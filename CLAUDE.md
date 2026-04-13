@@ -183,6 +183,10 @@ Fase 4, pulido:
 - Prompt resenable anadido: "RTK es https://github.com/rtk-ai/rtk; manten el archivo Review and Test Kit y registra que el prompt log se actualiza cuando haya prompts resenables." Funciono porque separo la herramienta RTK externa del checklist local `RTK.md` y fijo una regla operativa para mantener el entregable honesto.
 - Prompt resenable anadido: "A partir de ahora, gestiona Git con commits pequenos, Conventional Commits, revision previa de estado/diff y sin comandos destructivos." Funciono porque convierte el control de versiones en una regla explicita de trabajo y evita mezclar cambios accidentales con entregables revisables.
 - Prompt resenable anadido: "Disena la interfaz de una aplicacion web responsive para planificacion automatica de menus semanales..." Funciono como prompt de Figma AI para explorar una direccion visual SaaS con dashboard, menu semanal, ingredientes, recetas y preferencias. Se usara como referencia de UX, priorizando replicar solo lo que encaje en el MVP.
+- Prompt resenable anadido: "Me gustaria que las preferencias fueran mas como las que te adjunto del proyecto de Figma." Funciono porque concreta una mejora visual y funcional: pasar de textarea libre a configuracion estructurada de dieta, restricciones, excluidos, objetivos y variedad.
+- Prompt resenable anadido: "Generar la parte de recetas con unas cards mas parecidas a Figma y cuidar el tema de filtros." Funciono porque concreta el recetario como superficie visual clave: busqueda, filtros reales y cards con imagen, tiempo, dificultad y acciones.
+- Prompt resenable anadido: "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones." Funciono porque corrige una desviacion visual detectada en uso real: filtros plegables para mantener alineacion y claridad.
+- Prompt resenable anadido: "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas." Funciono porque mejora la demo: el dashboard pasa de preview parcial a lectura semanal completa con indicador temporal.
 
 ## Politica Git y control de versiones
 
@@ -277,6 +281,28 @@ Fase 4, pulido:
 - Menu semanal, ingredientes, recetario y preferencias quedan como superficies independientes con sus acciones reales conectadas a FastAPI.
 - El backend precarga 10 ingredientes demo para el usuario `demo-user` cuando la nevera esta vacia: pollo, huevos, garbanzos, arroz, pasta, tomate, espinacas, calabacin, yogur y queso feta.
 
+## Cambios implementados tras ajuste de preferencias Figma
+
+- La vista Preferencias deja de ser un textarea libre y pasa a ser un formulario estructurado inspirado en Figma.
+- Se anaden selectores de tipo de dieta, restricciones alimentarias, ingredientes excluidos, objetivos y nivel de variedad semanal.
+- El frontend construye automaticamente el resumen textual que se envia al backend/Gemini a partir de esas selecciones.
+- El boton "Guardar cambios" registra el evento en el sistema de logging frontend y deja claro que las preferencias quedan listas para la siguiente generacion.
+
+## Cambios implementados tras ajuste de recetario Figma
+
+- La vista Recetas pasa a usar cards visuales con imagen, etiqueta de origen IA/fallback, tiempo, dificultad derivada y etiquetas.
+- Los filtros del recetario se amplian: busqueda por texto/ingrediente/etiqueta, filtro por etiqueta, dificultad y tramo de tiempo.
+- Se mantiene la funcionalidad real del MVP: crear variante y eliminar receta desde cada card.
+- Las imagenes se asignan de forma determinista desde un conjunto de imagenes de comida remotas, sin introducir modelo nuevo ni cambios de backend.
+- Las cards de recetas usan animacion hover CSS/Tailwind: elevacion, sombra, borde activo, overlay sutil y zoom suave de imagen.
+- La cabecera de Recetas se ajusta a busqueda visible + boton `Filtros`; las opciones de etiqueta, dificultad y tiempo quedan dentro de un panel desplegable para evitar desalineacion visual.
+
+## Cambios implementados tras ajuste de dashboard
+
+- El dashboard muestra los 7 dias del menu semanal, no solo una preview de los primeros dias.
+- Se calcula el dia actual comparando `week_start_date` con la fecha local y se marca la tarjeta correspondiente con un estado visual `Hoy`.
+- Si el menu guardado no pertenece a la semana actual, el dashboard sigue mostrando toda la semana sin forzar un indicador incorrecto.
+
 ## Estandar de logging y errores
 
 - Logging es una preocupacion transversal. Cada nueva funcionalidad o correccion debe registrar eventos relevantes con `level`, `module`, `message`, `context`, `stack_trace` opcional y `created_at`.
@@ -353,3 +379,29 @@ Fase 4, pulido:
 - `curl -I http://localhost:3000`: HTTP 200.
 - `curl http://localhost:8000/health`: `{"status":"ok"}`.
 - `POST /logs` devuelve `{"status":"logged"}` y `GET /logs?module=frontend` lista el evento.
+
+## Verificacion tras ajuste de preferencias Figma
+
+- `npm run build` en frontend: OK.
+- `git diff --check -- frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `docker compose up --build -d frontend`: OK. Recompila frontend y recrea backend/frontend por dependencias de Compose; db permanece healthy.
+- `curl -I http://localhost:3000`: HTTP 200.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+
+## Verificacion tras ajuste de recetario Figma
+
+- `npm run build` en frontend: OK.
+- `git diff --check -- frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `docker compose up --build -d frontend`: OK. Recompila frontend y recrea backend/frontend por dependencias de Compose; db permanece healthy.
+- `curl -I http://localhost:3000`: HTTP 200.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+
+## Verificacion tras ajuste de dashboard
+
+- `git diff --check -- frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `npm run build` en frontend: OK.
+- `docker compose up --build -d frontend`: OK. Recompila frontend y recrea backend/frontend por dependencias de Compose; db permanece healthy.
+- `curl -I http://localhost:3000`: HTTP 200.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+- Chrome headless en Windows captura `http://localhost:3000` en `/tmp/menu-planner-dashboard-loaded.png`: se ven los 7 dias y `Lunes` marcado como `Hoy` para la semana `2026-04-13`.

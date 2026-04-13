@@ -171,6 +171,18 @@ En DBeaver, la tabla aparece en `menu_planner -> Schemas -> public -> Tables -> 
 10. "Implementar un sistema de logging y manejo de errores consistente para frontend y backend."
     Funciono porque fijo el logging como preocupacion transversal: tabla `system_logs`, servicio central en backend, endpoint para eventos frontend y estandar de modulos por origen.
 
+11. "Me gustaria que las preferencias fueran mas como las del proyecto de Figma."
+    Funciono porque llevo la pantalla de preferencias desde un textarea libre a un formulario defendible: dieta, restricciones, ingredientes excluidos, objetivos y variedad semanal.
+
+12. "Generar la parte de recetas con unas cards mas parecidas a Figma y cuidar el tema de filtros."
+    Funciono porque convierte el recetario en una pantalla mas demostrable: busqueda, filtros por etiqueta, dificultad y tiempo, y cards visuales con imagen y acciones.
+
+13. "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones."
+    Funciono porque corrige un problema visual real: la busqueda queda alineada y los filtros avanzados aparecen solo cuando aportan valor.
+
+14. "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas."
+    Funciono porque convierte el dashboard en una lectura semanal completa y mejora la orientacion temporal de la demo marcando el dia actual.
+
 ## Guion sugerido para video de 3 minutos
 
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.

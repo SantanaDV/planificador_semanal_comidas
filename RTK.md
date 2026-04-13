@@ -26,7 +26,7 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [x] La nevera del usuario demo arranca con ingredientes precargados para probar sin alta manual.
 - [x] Existe tabla `system_logs` para logs estructurados.
 - [x] `GET /logs` y `POST /logs` funcionan localmente.
-- [ ] Prompt log tiene al menos 3 prompts.
+- [x] Prompt log tiene al menos 3 prompts.
 - [ ] Video de 3 minutos cubre problema, solucion, IA usada, incluyendo Antigravity/Codex, Figma AI y Gemini, demo y mejoras.
 
 ## Uso del codigo de Figma
@@ -35,8 +35,11 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [x] Reutilizar objetivos visuales compatibles con el MVP: navegacion, dashboard, estadisticas, menu semanal claro, bloque IA y filtros.
 - [x] Descartar por alcance: Vite, React Router, MUI/Radix/shadcn completos, mock data estatica, rutas separadas de detalle/preferencias y modales avanzados.
 - [x] Separar la UI en vistas internas: Dashboard, Menu semanal, Ingredientes, Recetas y Preferencias.
+- [x] Adaptar Preferencias al patron Figma: dieta, restricciones, excluidos, objetivos y variedad.
 - [x] Verificar render inicial en navegador headless.
 - [ ] Verificar en navegador que la UI adaptada conserva el flujo demo y no tapa el uso real de la API.
+- [x] Recetario usa cards visuales tipo Figma y filtros plegables por busqueda, etiqueta, dificultad y tiempo.
+- [x] Dashboard muestra los 7 dias del menu semanal y marca el dia actual cuando la semana coincide.
 
 ## Decision Docker/Next
 
