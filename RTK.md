@@ -10,7 +10,7 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - No se debe commitear ninguna clave real, archivo `.env`, build local, cache o dependencia instalada.
 - La clave de Gemini debe vivir en `.env` local o en variables de entorno del sistema.
 - La llamada a Gemini debe hacerse desde el backend; el frontend no debe recibir ni exponer `GEMINI_API_KEY`.
-- Si Gemini no esta configurado o falla, el fallback local puede mantener la demo funcionando, pero la UI debe mostrar el modelo usado mediante `ai_model`.
+- Si Gemini no esta configurado o falla, el fallback local puede mantener la demo funcionando; la UI debe avisar antes de generar, pero no destacar `ai_model` como etiqueta principal del menu.
 
 ## Checklist antes de entregar
 
@@ -23,7 +23,14 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [x] `http://localhost:3000` carga el frontend.
 - [x] `http://localhost:8000/docs` carga la API.
 - [ ] Flujo demo: ingredientes -> preferencias -> generar menu -> sustituir -> repetir receta -> filtrar recetario.
-- [x] La nevera del usuario demo arranca con ingredientes precargados para probar sin alta manual.
+- [x] La nevera vacia muestra estado claro y permite cargar ingredientes de prueba bajo demanda.
+- [x] `POST /ingredients/demo` persiste ingredientes demo en base de datos; no hay precarga automatica en arranque.
+- [x] Las categorias de ingredientes vienen de base de datos mediante `GET /ingredient-categories`.
+- [x] Ingredientes usa modal de alta con nombre, categoria, cantidad y fecha de caducidad.
+- [x] Ingredientes permite filtrar por busqueda/categoria y ordenar por caducidad o cantidad.
+- [x] `GET /ai/status` expone si se usara Gemini real o fallback local.
+- [x] Generar menu con nevera vacia o con menos de 5 ingredientes abre modal, no redirige automaticamente.
+- [x] Sin clave valida de Gemini, la app avisa antes de continuar con modo demo.
 - [x] Existe tabla `system_logs` para logs estructurados.
 - [x] `GET /logs` y `POST /logs` funcionan localmente.
 - [x] Prompt log tiene al menos 3 prompts.

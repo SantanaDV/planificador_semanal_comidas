@@ -1,6 +1,6 @@
 # Memoria viva del proyecto
 
-Ultima actualizacion: 2026-04-13.
+Ultima actualizacion: 2026-04-14.
 
 ## Resumen del reto
 
@@ -39,9 +39,9 @@ Decision IA: se actualiza el modelo por defecto a `gemini-2.5-flash-lite` porque
 
 ## Checklist de entregables y calidad
 
-- [ ] App arranca localmente con `docker compose up --build`.
-- [ ] Frontend accesible en `http://localhost:3000`.
-- [ ] API accesible en `http://localhost:8000/docs`.
+- [x] App arranca localmente con `docker compose up --build`.
+- [x] Frontend accesible en `http://localhost:3000`.
+- [x] API accesible en `http://localhost:8000/docs`.
 - [x] README contiene pasos claros, variables de entorno y solucion de problemas minima.
 - [x] Prompt log con al menos 3 prompts y explicacion breve.
 - [x] CLAUDE.md registra decisiones, cambios, roadmap y riesgos.
@@ -65,7 +65,7 @@ Justificacion: para una prueba de 72 horas evita complejidad de microservicios, 
 En alcance:
 
 - Usuario demo sin registro.
-- CRUD basico de ingredientes.
+- CRUD basico de ingredientes con categorias persistidas, cantidad y fecha de caducidad.
 - Generacion de menu semanal para comida y cena de 7 dias.
 - Persistencia de menus y recetas generadas.
 - Historial basico: el prompt recibe recetas recientes para evitar repeticion.
@@ -117,7 +117,8 @@ Fuera de alcance inicial:
 ## Esquema inicial de base de datos
 
 - `users`: usuario demo y preferencias generales.
-- `ingredients`: ingredientes de la nevera por usuario.
+- `ingredient_categories`: categorias controladas para ingredientes, ampliables en el futuro.
+- `ingredients`: ingredientes de la nevera por usuario, categoria, cantidad y fecha de caducidad.
 - `recipes`: recetas guardadas/generadas, ingredientes, pasos, etiquetas y fuente.
 - `weekly_menus`: menu generado por semana, preferencias usadas, modelo IA y metadatos.
 - `menu_items`: plato de un dia y tipo de comida, enlazado a receta y con explicacion.
@@ -189,6 +190,9 @@ Fase 4, pulido:
 - Prompt resenable anadido: "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones." Funciono porque corrige una desviacion visual detectada en uso real: filtros plegables para mantener alineacion y claridad.
 - Prompt resenable anadido: "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas." Funciono porque mejora la demo: el dashboard pasa de preview parcial a lectura semanal completa con indicador temporal.
 - Prompt resenable anadido: "Implementa la vista extendida de detalle de receta siguiendo el diseno actual y dejandola preparada para edicion real." Funciono porque convierte el recetario en una pantalla completa de producto y obliga a cerrar el contrato backend de edicion.
+- Prompt resenable anadido: "Eliminar mocks hardcodeados y sustituirlos por estados vacios, datos demo bajo demanda y fallback documentado." Funciono porque diferencia datos reales, carga demo persistida y fallback local sin depender de mocks de UI.
+- Prompt resenable anadido: "Corregir el flujo de generacion cuando faltan ingredientes o falta la clave de IA." Funciono porque evita redirecciones inesperadas y convierte las validaciones en decisiones explicitas del usuario.
+- Prompt resenable anadido: "Mejorar la gestion de ingredientes con modal, categorias en base de datos, caducidad y filtros." Funciono porque convierte la nevera en una fuente de datos mas realista para IA y elimina el campo unidad libre del flujo principal.
 
 ## Politica Git y control de versiones
 
@@ -281,7 +285,7 @@ Fase 4, pulido:
 - La UI ya no es una pagina larga con anclas; cada vista aparece como una capa separada, mas cercana al prototipo Figma, manteniendo una sola ruta Next.js para no ampliar complejidad.
 - Dashboard concentra resumen, imagen, estadisticas, vista rapida del menu, ingredientes listos y recetas recientes.
 - Menu semanal, ingredientes, recetario y preferencias quedan como superficies independientes con sus acciones reales conectadas a FastAPI.
-- El backend precarga 10 ingredientes demo para el usuario `demo-user` cuando la nevera esta vacia: pollo, huevos, garbanzos, arroz, pasta, tomate, espinacas, calabacin, yogur y queso feta.
+- Decision actualizada el 2026-04-14: el backend ya no precarga ingredientes al arrancar. La nevera vacia se muestra como estado real y los ingredientes de prueba se cargan bajo demanda con `POST /ingredients/demo`.
 
 ## Cambios implementados tras ajuste de preferencias Figma
 
@@ -312,6 +316,38 @@ Fase 4, pulido:
 - El frontend permite editar nombre, descripcion, ingredientes/cantidades, pasos, etiquetas, tiempo, dificultad y raciones desde la misma pantalla.
 - El backend anade `PATCH /recipes/{recipe_id}` y campos persistentes `difficulty` y `servings` en `Recipe`.
 - Para bases existentes se anade una migracion ligera de arranque que asegura las columnas `difficulty` y `servings` sin introducir Alembic en el MVP.
+
+## Cambios implementados tras eliminar mocks hardcodeados
+
+- Se elimina la precarga automatica de ingredientes demo en el arranque del backend.
+- Se anade `POST /ingredients/demo` para cargar ingredientes de prueba bajo demanda y persistirlos en base de datos.
+- Se anade `GET /ai/status` para que el frontend pueda decidir si debe avisar antes de usar el fallback local.
+- El backend bloquea `POST /menus/generate` cuando no hay ingredientes guardados, evitando menus con ingredientes inventados.
+- El fallback local se mueve a `backend/app/demo_fallback.py` y queda documentado como modo demo/desarrollo.
+- Los ingredientes demo viven en `backend/app/demo_data.py`, separados del flujo principal de API.
+- El frontend muestra estado vacio para nevera sin ingredientes y ofrece una accion visible para cargar ingredientes de prueba.
+- Las preferencias iniciales quedan neutras: sin restricciones, excluidos ni objetivos preseleccionados del prototipo.
+
+## Cambios implementados tras ajuste del flujo de generacion
+
+- Se define un minimo de 5 ingredientes para generar un menu semanal util.
+- El frontend deja de redirigir automaticamente a Ingredientes cuando el usuario pulsa "Generar menu semanal" sin nevera suficiente.
+- Se anade un modal de aviso para nevera vacia o insuficiente con acciones: "Ir a ingredientes", "Anadir ingredientes de prueba" y "Cancelar".
+- El boton "Anadir ingredientes de prueba" deja de aparecer como accion principal del dashboard.
+- Si hay ingredientes suficientes pero no hay clave valida de Gemini, se muestra un modal previo para continuar con modo demo o cancelar.
+- La UI deja de mostrar `Gemini real`, `Menu IA`, `fallback local` o `ai_model` como etiquetas protagonistas del menu generado; esa diferencia queda para README y logs.
+- El backend valida tambien el minimo de 5 ingredientes antes de llamar a Gemini o al fallback local.
+
+## Cambios implementados tras mejora de ingredientes
+
+- Se anade la tabla `ingredient_categories` con categorias iniciales: Verduras, Frutas, Proteinas, Lacteos, Cereales, Legumbres, Especias y Otros.
+- Se anade `GET /ingredient-categories` y `category_id` en el contrato de ingredientes; se mantiene la columna legacy `category` solo para compatibilidad con bases existentes.
+- Se sustituye el campo de UI `unidad` por `fecha de caducidad`; la cantidad pasa a ser un texto completo como `500 g`.
+- Se anade `expires_at` a ingredientes y se incluye en el payload que recibe Gemini/fallback para poder priorizar productos proximos a caducar.
+- Se anade una migracion ligera de arranque para asegurar `expires_at` y `category_id` en bases existentes sin introducir Alembic en el MVP.
+- Se anade un backfill conservador para completar caducidad y cantidad de los ingredientes demo legacy si ya existian en una base local.
+- La vista Ingredientes deja de mostrar formulario fijo y usa un modal de alta con nombre, categoria, cantidad y calendario de caducidad.
+- Los filtros de Ingredientes incluyen busqueda, categoria y orden por caducidad ASC/DESC o cantidad parseada del texto.
 
 ## Estandar de logging y errores
 
@@ -373,7 +409,7 @@ Fase 4, pulido:
 - `npm run build` en frontend: OK.
 - `python3 -m compileall backend/app`: OK.
 - Smoke test backend con SQLite temporal y `GEMINI_API_KEY=`: OK. Valida 10 ingredientes demo, generacion de 14 platos y `ai_model=fallback-local`.
-- `docker compose up --build -d`: OK tras los cambios de UI y seed.
+- `docker compose up --build -d`: OK tras los cambios de UI y carga demo inicial.
 - `curl -I http://localhost:3000`: HTTP 200.
 - `curl http://localhost:8000/health`: `{"status":"ok"}`.
 - `curl http://localhost:8000/ingredients`: devuelve 10 ingredientes demo.
@@ -426,3 +462,38 @@ Fase 4, pulido:
 - Smoke test Docker/API real: `GET /health` 200, `POST /recipes` 201, `PATCH /recipes/{id}` 200 y `DELETE /recipes/{id}` 204 para una receta temporal.
 - `curl -I http://localhost:3000`: HTTP 200.
 - `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+
+## Verificacion tras eliminar mocks hardcodeados
+
+- `git diff --check -- .env.example CLAUDE.md README.md RTK.md backend/app/ai.py backend/app/config.py backend/app/main.py backend/app/schemas.py backend/app/demo_data.py backend/app/demo_fallback.py frontend/app/page.tsx`: OK.
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=`: OK. Valida `GET /ai/status` en modo fallback, `GET /ingredients` vacio, `POST /menus/generate` 400 sin ingredientes, `POST /ingredients/demo` crea 10 ingredientes y `POST /menus/generate` devuelve 14 platos con `ai_model=fallback-local`.
+- `docker compose config`: OK, sin claves reales.
+- `docker compose up --build -d`: OK. Recompila backend/frontend y arranca contra PostgreSQL existente.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+- `curl -I http://localhost:8000/docs`: HTTP 200.
+- `curl http://localhost:8000/ai/status`: fallback local cuando `GEMINI_API_KEY` esta vacia.
+- `curl -I http://localhost:3000`: HTTP 200.
+
+## Verificacion tras ajuste del flujo de generacion
+
+- `git diff --check -- .env.example CLAUDE.md README.md RTK.md backend/app/ai.py backend/app/config.py backend/app/main.py backend/app/schemas.py backend/app/demo_data.py backend/app/demo_fallback.py frontend/app/page.tsx`: OK.
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=`: OK. Valida `POST /menus/generate` 400 con 0 ingredientes, 400 con 1 ingrediente, `POST /ingredients/demo` y generacion posterior de 14 platos con `ai_model=fallback-local`.
+- `docker compose up --build -d frontend`: OK. Recompila backend/frontend y arranca contra PostgreSQL existente.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+- `curl -I http://localhost:3000`: HTTP 200.
+
+## Verificacion tras mejora de ingredientes
+
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=` usando dependencias en `/tmp/menu-backend-deps`: OK. Valida `GET /ingredient-categories`, `POST /ingredients` con `category_id` y `expires_at`, `POST /menus/generate` 400 con 1 ingrediente, `POST /ingredients/demo` y generacion posterior de 14 platos con `ai_model=fallback-local`.
+- `docker compose up --build -d`: OK. Recompila backend/frontend y aplica migracion ligera sobre PostgreSQL existente.
+- Smoke test Docker/API real: `GET /health` 200, `GET /ingredient-categories` devuelve 8 categorias, `POST /ingredients` con caducidad 201 y `DELETE /ingredients/{id}` 204 para un ingrediente temporal.
+- `curl http://localhost:8000/ingredients`: OK. Los ingredientes demo legacy quedan con `category_id`, cantidad completa y `expires_at`.
+- `curl -I http://localhost:3000`: HTTP 200.
