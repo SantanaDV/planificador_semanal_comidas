@@ -7,15 +7,37 @@ from pydantic import BaseModel, ConfigDict, Field
 class IngredientCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     quantity: str | None = Field(default=None, max_length=80)
-    unit: str | None = Field(default=None, max_length=40)
-    category: str | None = Field(default=None, max_length=80)
+    category_id: str | None = Field(default=None, max_length=36)
+    expires_at: date | None = None
 
 
-class IngredientOut(IngredientCreate):
+class IngredientOut(BaseModel):
     id: str
+    name: str
+    quantity: str | None = None
+    category_id: str | None = None
+    category: str | None = None
+    expires_at: date | None = None
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class IngredientCategoryOut(BaseModel):
+    id: str
+    name: str
+    sort_order: int = 0
+    created_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AiStatusOut(BaseModel):
+    provider: str = "gemini"
+    model: str
+    configured: bool
+    mode: Literal["ai", "fallback"]
+    message: str
 
 
 class RecipeCreate(BaseModel):

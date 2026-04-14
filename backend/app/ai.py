@@ -7,10 +7,8 @@ from typing import Any
 import httpx
 
 from .config import settings
+from .demo_fallback import DAYS, MEAL_TYPES, build_replacement_item, build_variant, build_weekly_menu
 from .logging_service import record_exception, record_log
-
-DAYS = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
-MEAL_TYPES = ["comida", "cena"]
 
 RecipePayload = dict[str, Any]
 MenuPayload = dict[str, Any]
@@ -27,7 +25,7 @@ def generate_weekly_menu(
         payload["ai_model"] = settings.gemini_model
         return payload
 
-    fallback = _fallback_menu(ingredients, preferences, previous_recipe_titles)
+    fallback = build_weekly_menu(ingredients, preferences, previous_recipe_titles)
     fallback["ai_model"] = "fallback-local"
     return fallback
 
@@ -42,7 +40,7 @@ def generate_replacement(
     prompt = _build_replacement_prompt(ingredients, preferences, previous_recipe_titles, day_index, meal_type)
     payload = _call_gemini(prompt)
     if payload and isinstance(payload.get("recipe"), dict):
-        return _normalize_item(
+        item = _normalize_item(
             {
                 "day_index": day_index,
                 "day_name": DAYS[day_index],
@@ -54,8 +52,12 @@ def generate_replacement(
             meal_type,
             ingredients,
         )
+        item["ai_model"] = settings.gemini_model
+        return item
 
-    return _fallback_item(day_index, meal_type, ingredients, preferences, previous_recipe_titles, offset=5)
+    fallback = build_replacement_item(day_index, meal_type, ingredients, preferences, previous_recipe_titles, offset=5)
+    fallback["ai_model"] = "fallback-local"
+    return fallback
 
 
 def generate_variant(recipe: dict[str, Any], preferences: str) -> RecipePayload:
@@ -74,31 +76,16 @@ def generate_variant(recipe: dict[str, Any], preferences: str) -> RecipePayload:
             "explanation": str(payload.get("explanation") or "Variante generada desde una receta guardada."),
         }
 
-    base_title = recipe.get("title") or "receta guardada"
-    variant = _normalize_recipe(
-        {
-            "title": f"Variante de {base_title}",
-            "description": "Version rapida con ajustes de ingredientes y preparacion.",
-            "ingredients": list(recipe.get("ingredients") or [])[:4] + ["hierbas frescas", "limon"],
-            "steps": [
-                "Prepara los ingredientes principales.",
-                "Saltea o asa la base con hierbas frescas.",
-                "Ajusta con limon y sirve caliente.",
-            ],
-            "tags": list(set((recipe.get("tags") or []) + ["variante", "rapida"])),
-            "prep_time_minutes": recipe.get("prep_time_minutes") or 25,
-        },
-        ["verduras"],
-    )
+    variant = _normalize_recipe(build_variant(recipe), ["verduras"])
     return {"recipe": variant, "explanation": "Fallback local: variante simple para mantener la demo operativa."}
 
 
 def _call_gemini(prompt: str) -> dict[str, Any] | None:
-    if not settings.gemini_api_key:
+    if not settings.has_valid_gemini_api_key:
         record_log(
             "warning",
             "ai",
-            "Gemini API key no configurada; se usa fallback local",
+            "Gemini API key ausente o no valida; se usa fallback local",
             {"model": settings.gemini_model},
         )
         return None
@@ -108,7 +95,7 @@ def _call_gemini(prompt: str) -> dict[str, Any] | None:
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
     }
-    headers = {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key}
+    headers = {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key or ""}
 
     try:
         with httpx.Client(timeout=25) as client:
@@ -176,74 +163,6 @@ def _build_replacement_prompt(
 def _has_valid_items(payload: dict[str, Any], expected: int) -> bool:
     items = payload.get("items")
     return isinstance(items, list) and len(items) >= expected
-
-
-def _fallback_menu(
-    ingredients: list[dict[str, str | None]],
-    preferences: str,
-    previous_recipe_titles: list[str],
-) -> MenuPayload:
-    items = []
-    for day_index, _day in enumerate(DAYS):
-        for meal_type in MEAL_TYPES:
-            offset = day_index * 2 + MEAL_TYPES.index(meal_type)
-            items.append(_fallback_item(day_index, meal_type, ingredients, preferences, previous_recipe_titles, offset))
-    return {
-        "items": items,
-        "notes": "Menu creado con fallback local para garantizar ejecucion sin clave de Gemini.",
-    }
-
-
-def _fallback_item(
-    day_index: int,
-    meal_type: str,
-    ingredients: list[dict[str, str | None]],
-    preferences: str,
-    previous_recipe_titles: list[str],
-    offset: int,
-) -> RecipePayload:
-    names = [str(item.get("name")).strip() for item in ingredients if item.get("name")]
-    if not names:
-        names = ["verduras", "arroz", "huevos", "legumbres", "pasta", "pollo", "tomate"]
-
-    main = names[offset % len(names)]
-    side = names[(offset + 2) % len(names)]
-    templates = [
-        ("Bowl rapido de {main} y {side}", "Bowl templado con base de cereal, proteina sencilla y verduras."),
-        ("Salteado de {main} con {side}", "Salteado de una sarten pensado para aprovechar nevera."),
-        ("Tortilla abierta de {main}", "Receta flexible para una cena rapida y saciante."),
-        ("Pasta corta con {main}", "Plato de despensa con salsa ligera y verduras."),
-        ("Ensalada completa de {main}", "Plato fresco con contraste de textura y una vinagreta simple."),
-        ("Guiso suave de {main} y {side}", "Preparacion de cuchara con ingredientes cotidianos."),
-    ]
-    title_template, description = templates[offset % len(templates)]
-    title = title_template.format(main=main, side=side)
-
-    if title in previous_recipe_titles:
-        title = f"{title} version {DAYS[day_index].lower()}"
-
-    tags = ["fallback", "aprovechamiento", meal_type]
-    if preferences:
-        tags.append("preferencias")
-
-    return {
-        "day_index": day_index,
-        "day_name": DAYS[day_index],
-        "meal_type": meal_type,
-        "explanation": f"Usa {main} y rota tecnicas para evitar repetir la semana anterior.",
-        "recipe": {
-            "title": title,
-            "description": description,
-            "ingredients": [main, side, "aceite de oliva", "sal", "pimienta"],
-            "steps": [
-                "Lava y corta los ingredientes principales.",
-                "Cocina la base a fuego medio hasta que este tierna.",
-                "Ajusta sal, pimienta y sirve en el momento.",
-            ],
-            "tags": tags,
-            "prep_time_minutes": 25 + (offset % 3) * 5,
-        },
-    }
 
 
 def normalize_menu_item(

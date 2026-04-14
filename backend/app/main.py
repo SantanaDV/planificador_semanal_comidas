@@ -3,20 +3,24 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from typing import Any
+from unicodedata import combining, normalize
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import inspect, select, text
+from sqlalchemy import case, inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import ai
 from .config import settings
 from .database import Base, engine, get_session
+from .demo_data import DEFAULT_INGREDIENT_CATEGORIES, DEMO_INGREDIENTS
 from .logging_service import record_exception, record_log
-from .models import Ingredient, MenuItem, Recipe, SystemLog, User, WeeklyMenu
+from .models import Ingredient, IngredientCategory, MenuItem, Recipe, SystemLog, User, WeeklyMenu
 from .schemas import (
+    AiStatusOut,
     GenerateMenuRequest,
+    IngredientCategoryOut,
     IngredientCreate,
     IngredientOut,
     RecipeCreate,
@@ -30,28 +34,29 @@ from .schemas import (
 )
 
 DEMO_USER_ID = "demo-user"
-DEMO_INGREDIENTS = [
-    {"name": "Pechuga de pollo", "quantity": "600", "unit": "g", "category": "Proteinas"},
-    {"name": "Huevos", "quantity": "8", "unit": "unidades", "category": "Proteinas"},
-    {"name": "Garbanzos cocidos", "quantity": "1", "unit": "bote", "category": "Legumbres"},
-    {"name": "Arroz basmati", "quantity": "500", "unit": "g", "category": "Cereales"},
-    {"name": "Pasta integral", "quantity": "400", "unit": "g", "category": "Cereales"},
-    {"name": "Tomate cherry", "quantity": "250", "unit": "g", "category": "Verduras"},
-    {"name": "Espinacas", "quantity": "1", "unit": "bolsa", "category": "Verduras"},
-    {"name": "Calabacin", "quantity": "2", "unit": "unidades", "category": "Verduras"},
-    {"name": "Yogur natural", "quantity": "4", "unit": "unidades", "category": "Lacteos"},
-    {"name": "Queso feta", "quantity": "150", "unit": "g", "category": "Lacteos"},
-]
+MIN_INGREDIENTS_FOR_MENU = 5
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_recipe_edit_columns()
+    ensure_ingredient_schema()
     with Session(engine) as session:
         ensure_demo_user(session)
-        ensure_demo_ingredients(session)
-    record_log("info", "backend", "Aplicacion iniciada", {"service": "api", "gemini_model": settings.gemini_model})
+        ensure_ingredient_categories(session)
+        backfill_ingredient_categories(session)
+        backfill_demo_ingredient_details(session)
+    record_log(
+        "info",
+        "backend",
+        "Aplicacion iniciada",
+        {
+            "service": "api",
+            "gemini_model": settings.gemini_model,
+            "gemini_configured": settings.has_valid_gemini_api_key,
+        },
+    )
     yield
 
 
@@ -97,6 +102,21 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ai/status", response_model=AiStatusOut)
+def ai_status() -> AiStatusOut:
+    configured = settings.has_valid_gemini_api_key
+    return AiStatusOut(
+        model=settings.gemini_model,
+        configured=configured,
+        mode="ai" if configured else "fallback",
+        message=(
+            "Gemini configurado. La generacion usara IA real."
+            if configured
+            else "Gemini no esta configurado. La generacion usara fallback local de demo."
+        ),
+    )
+
+
 @app.get("/logs", response_model=list[SystemLogOut])
 def list_system_logs(
     level: str = Query(default=""),
@@ -118,19 +138,75 @@ def create_client_log(payload: SystemLogCreate) -> dict[str, str]:
     return {"status": "logged"}
 
 
+@app.get("/ingredient-categories", response_model=list[IngredientCategoryOut])
+def list_ingredient_categories(session: Session = Depends(get_session)) -> list[IngredientCategory]:
+    return list(session.scalars(select(IngredientCategory).order_by(IngredientCategory.sort_order, IngredientCategory.name)))
+
+
 @app.get("/ingredients", response_model=list[IngredientOut])
 def list_ingredients(session: Session = Depends(get_session)) -> list[Ingredient]:
     return list(
         session.scalars(
-            select(Ingredient).where(Ingredient.user_id == DEMO_USER_ID).order_by(Ingredient.created_at.desc())
+            select(Ingredient)
+            .where(Ingredient.user_id == DEMO_USER_ID)
+            .order_by(case((Ingredient.expires_at.is_(None), 1), else_=0), Ingredient.expires_at, Ingredient.created_at.desc())
         )
     )
+
+
+@app.post("/ingredients/demo", response_model=list[IngredientOut], status_code=status.HTTP_201_CREATED)
+def create_demo_ingredients(session: Session = Depends(get_session)) -> list[Ingredient]:
+    ensure_demo_user(session)
+    ensure_ingredient_categories(session)
+    categories_by_key = ingredient_category_map(session)
+    existing_names = {
+        name.strip().lower()
+        for name in session.scalars(select(Ingredient.name).where(Ingredient.user_id == DEMO_USER_ID)).all()
+    }
+    new_ingredients = []
+    for payload in DEMO_INGREDIENTS:
+        if payload["name"].strip().lower() in existing_names:
+            continue
+        category = categories_by_key.get(normalize_label(payload.get("category", ""))) or categories_by_key[normalize_label("Otros")]
+        new_ingredients.append(
+            Ingredient(
+                user_id=DEMO_USER_ID,
+                name=payload["name"],
+                quantity=payload.get("quantity"),
+                expires_at=date.today() + timedelta(days=int(payload.get("expires_in_days", 14))),
+                category_id=category.id,
+                legacy_category=category.name,
+            )
+        )
+
+    if new_ingredients:
+        session.add_all(new_ingredients)
+        session.commit()
+        for ingredient in new_ingredients:
+            session.refresh(ingredient)
+
+    record_log(
+        "info",
+        "database",
+        "Ingredientes demo cargados bajo demanda",
+        {"created_count": len(new_ingredients), "requested_count": len(DEMO_INGREDIENTS)},
+    )
+    return new_ingredients
 
 
 @app.post("/ingredients", response_model=IngredientOut, status_code=status.HTTP_201_CREATED)
 def create_ingredient(payload: IngredientCreate, session: Session = Depends(get_session)) -> Ingredient:
     ensure_demo_user(session)
-    ingredient = Ingredient(user_id=DEMO_USER_ID, **payload.model_dump())
+    ensure_ingredient_categories(session)
+    category = resolve_ingredient_category(session, payload.category_id)
+    ingredient = Ingredient(
+        user_id=DEMO_USER_ID,
+        name=payload.name.strip(),
+        quantity=payload.quantity.strip() if payload.quantity else None,
+        expires_at=payload.expires_at,
+        category_id=category.id,
+        legacy_category=category.name,
+    )
     session.add(ingredient)
     session.commit()
     session.refresh(ingredient)
@@ -262,6 +338,23 @@ def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | Non
 def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
     ensure_demo_user(session)
     ingredients = _ingredient_payloads(session)
+    if len(ingredients) < MIN_INGREDIENTS_FOR_MENU:
+        detail = (
+            "Anade ingredientes antes de generar el menu o carga ingredientes de prueba."
+            if not ingredients
+            else f"Necesitas al menos {MIN_INGREDIENTS_FOR_MENU} ingredientes para generar un menu semanal util."
+        )
+        record_log(
+            "warning",
+            "menu_planning",
+            "Intento de generar menu con ingredientes insuficientes",
+            {"user_id": DEMO_USER_ID, "ingredient_count": len(ingredients), "minimum_required": MIN_INGREDIENTS_FOR_MENU},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        )
+
     previous_titles = _recent_recipe_titles(session)
     try:
         generated = ai.generate_weekly_menu(ingredients, payload.preferences, previous_titles)
@@ -344,7 +437,7 @@ def replace_menu_item(
     recipe = _create_recipe_from_payload(
         session,
         generated["recipe"],
-        source=settings.gemini_model if settings.gemini_api_key else "fallback-local",
+        source=generated.get("ai_model") or (settings.gemini_model if settings.has_valid_gemini_api_key else "fallback-local"),
     )
     item.recipe_id = recipe.id
     item.explanation = generated["explanation"]
@@ -395,16 +488,6 @@ def ensure_demo_user(session: Session) -> User:
     return user
 
 
-def ensure_demo_ingredients(session: Session) -> None:
-    has_ingredients = session.scalar(select(Ingredient.id).where(Ingredient.user_id == DEMO_USER_ID).limit(1))
-    if has_ingredients:
-        return
-
-    session.add_all(Ingredient(user_id=DEMO_USER_ID, **payload) for payload in DEMO_INGREDIENTS)
-    session.commit()
-    record_log("info", "database", "Ingredientes demo precargados", {"ingredient_count": len(DEMO_INGREDIENTS)})
-
-
 def ensure_recipe_edit_columns() -> None:
     inspector = inspect(engine)
     if "recipes" not in inspector.get_table_names():
@@ -430,6 +513,138 @@ def ensure_recipe_edit_columns() -> None:
         "Columnas de edicion de recetas aseguradas",
         {"columns": [column for column, _ in statements]},
     )
+
+
+def ensure_ingredient_schema() -> None:
+    inspector = inspect(engine)
+    if "ingredients" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("ingredients")}
+    statements: list[tuple[str, str]] = []
+    if "expires_at" not in columns:
+        statements.append(("expires_at", "ALTER TABLE ingredients ADD COLUMN expires_at DATE"))
+    if "category_id" not in columns:
+        statements.append(("category_id", "ALTER TABLE ingredients ADD COLUMN category_id VARCHAR(36)"))
+
+    if not statements:
+        return
+
+    with engine.begin() as connection:
+        for _, statement in statements:
+            connection.execute(text(statement))
+
+    record_log(
+        "info",
+        "database",
+        "Columnas de ingredientes aseguradas",
+        {"columns": [column for column, _ in statements]},
+    )
+
+
+def ensure_ingredient_categories(session: Session) -> None:
+    existing = {
+        normalize_label(name)
+        for name in session.scalars(select(IngredientCategory.name)).all()
+    }
+    created = []
+    for sort_order, name in enumerate(DEFAULT_INGREDIENT_CATEGORIES):
+        if normalize_label(name) in existing:
+            continue
+        created.append(IngredientCategory(name=name, sort_order=sort_order))
+
+    if not created:
+        return
+
+    session.add_all(created)
+    session.commit()
+    record_log("info", "database", "Categorias iniciales de ingredientes aseguradas", {"created_count": len(created)})
+
+
+def backfill_ingredient_categories(session: Session) -> None:
+    categories_by_key = ingredient_category_map(session)
+    fallback = categories_by_key.get(normalize_label("Otros"))
+    if not fallback:
+        return
+
+    ingredients = session.scalars(
+        select(Ingredient).where(Ingredient.category_id.is_(None), Ingredient.user_id == DEMO_USER_ID)
+    ).all()
+    updated = 0
+    for ingredient in ingredients:
+        category = categories_by_key.get(normalize_label(ingredient.legacy_category or "")) or fallback
+        ingredient.category_id = category.id
+        ingredient.legacy_category = category.name
+        updated += 1
+
+    if not updated:
+        return
+
+    session.commit()
+    record_log("info", "database", "Ingredientes legacy vinculados a categorias", {"updated_count": updated})
+
+
+def backfill_demo_ingredient_details(session: Session) -> None:
+    categories_by_key = ingredient_category_map(session)
+    demo_by_name = {payload["name"].strip().lower(): payload for payload in DEMO_INGREDIENTS}
+    ingredients = session.scalars(select(Ingredient).where(Ingredient.user_id == DEMO_USER_ID)).all()
+    updated = 0
+
+    for ingredient in ingredients:
+        payload = demo_by_name.get(ingredient.name.strip().lower())
+        if not payload:
+            continue
+
+        if ingredient.expires_at is None:
+            ingredient.expires_at = date.today() + timedelta(days=int(payload.get("expires_in_days", 14)))
+            updated += 1
+
+        expected_quantity = str(payload.get("quantity") or "")
+        if expected_quantity and (not ingredient.quantity or " " not in ingredient.quantity):
+            ingredient.quantity = expected_quantity
+            updated += 1
+
+        category = categories_by_key.get(normalize_label(payload.get("category", "")))
+        if category and not ingredient.category_id:
+            ingredient.category_id = category.id
+            ingredient.legacy_category = category.name
+            updated += 1
+
+    if not updated:
+        return
+
+    session.commit()
+    record_log("info", "database", "Detalles de ingredientes demo legacy actualizados", {"updated_fields": updated})
+
+
+def ingredient_category_map(session: Session) -> dict[str, IngredientCategory]:
+    return {
+        normalize_label(category.name): category
+        for category in session.scalars(select(IngredientCategory)).all()
+    }
+
+
+def resolve_ingredient_category(session: Session, category_id: str | None) -> IngredientCategory:
+    if category_id:
+        category = session.get(IngredientCategory, category_id)
+        if not category:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ingredient category not found")
+        return category
+
+    category = session.scalar(select(IngredientCategory).where(IngredientCategory.name == "Otros"))
+    if category:
+        return category
+
+    category = IngredientCategory(name="Otros", sort_order=len(DEFAULT_INGREDIENT_CATEGORIES))
+    session.add(category)
+    session.commit()
+    session.refresh(category)
+    return category
+
+
+def normalize_label(value: str) -> str:
+    decomposed = normalize("NFKD", value.strip().casefold())
+    return "".join(character for character in decomposed if not combining(character))
 
 
 def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
@@ -509,8 +724,8 @@ def _ingredient_payloads(session: Session) -> list[dict[str, str | None]]:
         {
             "name": ingredient.name,
             "quantity": ingredient.quantity,
-            "unit": ingredient.unit,
             "category": ingredient.category,
+            "expires_at": ingredient.expires_at.isoformat() if ingredient.expires_at else None,
         }
         for ingredient in ingredients
     ]

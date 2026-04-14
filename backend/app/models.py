@@ -27,6 +27,17 @@ class User(Base):
     menus: Mapped[list[WeeklyMenu]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+class IngredientCategory(Base):
+    __tablename__ = "ingredient_categories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    ingredients: Mapped[list["Ingredient"]] = relationship(back_populates="category_ref")
+
+
 class Ingredient(Base):
     __tablename__ = "ingredients"
 
@@ -34,11 +45,18 @@ class Ingredient(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     quantity: Mapped[str | None] = mapped_column(String(80))
+    expires_at: Mapped[date | None] = mapped_column(Date)
+    category_id: Mapped[str | None] = mapped_column(ForeignKey("ingredient_categories.id", ondelete="SET NULL"))
     unit: Mapped[str | None] = mapped_column(String(40))
-    category: Mapped[str | None] = mapped_column(String(80))
+    legacy_category: Mapped[str | None] = mapped_column("category", String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="ingredients")
+    category_ref: Mapped[IngredientCategory | None] = relationship(back_populates="ingredients")
+
+    @property
+    def category(self) -> str | None:
+        return self.category_ref.name if self.category_ref else self.legacy_category
 
 
 class Recipe(Base):

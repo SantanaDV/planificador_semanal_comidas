@@ -15,6 +15,19 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
+    @property
+    def has_valid_gemini_api_key(self) -> bool:
+        key = (self.gemini_api_key or "").strip()
+        if not key:
+            return False
+
+        normalized = key.lower()
+        placeholders = {"tu_clave", "your_api_key", "your_key", "replace_me", "changeme", "api_key"}
+        if normalized in placeholders or "placeholder" in normalized:
+            return False
+
+        return key.startswith("AIza") or len(key) >= 24
+
 
 @lru_cache
 def get_settings() -> Settings:
