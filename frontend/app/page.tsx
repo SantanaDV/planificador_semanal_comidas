@@ -6,8 +6,15 @@ type Ingredient = {
   id: string;
   name: string;
   quantity?: string | null;
-  unit?: string | null;
+  category_id?: string | null;
   category?: string | null;
+  expires_at?: string | null;
+};
+
+type IngredientCategory = {
+  id: string;
+  name: string;
+  sort_order: number;
 };
 
 type Recipe = {
@@ -41,8 +48,18 @@ type WeeklyMenu = {
   items: MenuItem[];
 };
 
+type AiStatus = {
+  provider: string;
+  model: string;
+  configured: boolean;
+  mode: "ai" | "fallback";
+  message: string;
+};
+
 type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "recipeDetail" | "preferences";
 type LogLevel = "info" | "warning" | "error";
+type GenerationGuard = "empty" | "insufficient" | "fallback" | null;
+type IngredientSort = "expiry_asc" | "expiry_desc" | "quantity_asc" | "quantity_desc";
 
 type PreferenceSettings = {
   dietType: string;
@@ -79,7 +96,15 @@ type RecipeUpdatePayload = {
   servings: number;
 };
 
+type IngredientForm = {
+  name: string;
+  quantity: string;
+  categoryId: string;
+  expiresAt: string;
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const MIN_INGREDIENTS_FOR_MENU = 5;
 const dietOptions = [
   { name: "Equilibrada", description: "Variedad de todos los grupos alimenticios" },
   { name: "Baja en carbohidratos", description: "Reduce harinas y azucares" },
@@ -101,6 +126,12 @@ const varietyOptions = [
 ];
 const recipeDifficultyOptions = ["Todas", "Facil", "Media", "Elaborada"];
 const recipeTimeOptions = ["Todos", "Hasta 30 min", "31-45 min", "+45 min"];
+const ingredientSortOptions: { value: IngredientSort; label: string }[] = [
+  { value: "expiry_asc", label: "Caducidad cercana" },
+  { value: "expiry_desc", label: "Caducidad lejana" },
+  { value: "quantity_asc", label: "Cantidad menor" },
+  { value: "quantity_desc", label: "Cantidad mayor" },
+];
 const recipeImages = [
   "https://images.unsplash.com/photo-1540189549336-e6e99c3679fe?auto=format&fit=crop&w=900&q=80",
   "https://images.unsplash.com/photo-1512621776951-a57141f2eefd?auto=format&fit=crop&w=900&q=80",
@@ -113,8 +144,8 @@ const recipeImages = [
 const defaultPreferenceSettings: PreferenceSettings = {
   dietType: "Equilibrada",
   restrictions: [],
-  excludedIngredients: ["Champinones", "Berenjenas", "Cilantro", "Queso azul"],
-  goals: ["Optimizar ingredientes disponibles"],
+  excludedIngredients: [],
+  goals: [],
   varietyLevel: "Media",
 };
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
@@ -130,7 +161,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(errorText || `Request failed with status ${response.status}`);
+    let errorMessage = errorText || `Request failed with status ${response.status}`;
+    try {
+      const parsed = JSON.parse(errorText) as { detail?: string };
+      errorMessage = parsed.detail || errorMessage;
+    } catch {
+      errorMessage = errorText || errorMessage;
+    }
+    throw new Error(errorMessage);
   }
 
   if (response.status === 204) {
@@ -216,8 +254,75 @@ function getRecipeImage(recipe: Recipe, index: number) {
   return recipeImages[hash % recipeImages.length];
 }
 
+function getRecipeSourceLabel(recipe: Recipe) {
+  const source = recipe.source.toLowerCase();
+  if (source.includes("variant")) return "Variante";
+  if (source.includes("manual")) return "Manual";
+  return "Generada";
+}
+
 function getRecipeServings(recipe: Recipe) {
   return recipe.servings && recipe.servings > 0 ? recipe.servings : 2;
+}
+
+function getDefaultIngredientCategoryId(categories: IngredientCategory[]) {
+  return categories.find((category) => category.name === "Otros")?.id ?? categories[0]?.id ?? "";
+}
+
+function buildDefaultIngredientForm(categories: IngredientCategory[]): IngredientForm {
+  return {
+    name: "",
+    quantity: "",
+    categoryId: getDefaultIngredientCategoryId(categories),
+    expiresAt: "",
+  };
+}
+
+function parseQuantityValue(quantity?: string | null) {
+  if (!quantity) return null;
+  const match = quantity.replace(",", ".").match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : null;
+}
+
+function compareOptionalNumbers(left: number | null, right: number | null, direction: "asc" | "desc") {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return direction === "asc" ? left - right : right - left;
+}
+
+function compareOptionalDates(left?: string | null, right?: string | null, direction: "asc" | "desc" = "asc") {
+  const leftTime = left ? parseLocalDate(left)?.getTime() ?? null : null;
+  const rightTime = right ? parseLocalDate(right)?.getTime() ?? null : null;
+  return compareOptionalNumbers(leftTime, rightTime, direction);
+}
+
+function sortIngredients(ingredients: Ingredient[], sort: IngredientSort) {
+  return [...ingredients].sort((left, right) => {
+    if (sort === "expiry_desc") return compareOptionalDates(left.expires_at, right.expires_at, "desc");
+    if (sort === "quantity_asc") return compareOptionalNumbers(parseQuantityValue(left.quantity), parseQuantityValue(right.quantity), "asc");
+    if (sort === "quantity_desc") return compareOptionalNumbers(parseQuantityValue(left.quantity), parseQuantityValue(right.quantity), "desc");
+    return compareOptionalDates(left.expires_at, right.expires_at, "asc");
+  });
+}
+
+function formatIngredientExpiry(value?: string | null) {
+  if (!value) return "Sin caducidad";
+  const date = parseLocalDate(value);
+  if (!date) return "Caducidad no valida";
+  return `Caduca ${new Intl.DateTimeFormat("es-ES", { day: "2-digit", month: "short" }).format(date)}`;
+}
+
+function getIngredientExpiryLabel(value?: string | null) {
+  if (!value) return "Sin fecha";
+  const date = parseLocalDate(value);
+  if (!date) return "Sin fecha";
+  const today = parseLocalDate(toLocalDateKey(new Date()));
+  if (!today) return "Sin fecha";
+  const diff = Math.ceil((date.getTime() - today.getTime()) / millisecondsPerDay);
+  if (diff < 0) return "Caducado";
+  if (diff <= 3) return "Caduca pronto";
+  return "En fecha";
 }
 
 function parseIngredientLine(value: string): RecipeIngredientDraft {
@@ -287,8 +392,11 @@ function getCurrentMenuDayIndex(menu: WeeklyMenu | null) {
 export default function Home() {
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [ingredientCategoryOptions, setIngredientCategoryOptions] = useState<IngredientCategory[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [menu, setMenu] = useState<WeeklyMenu | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [generationGuard, setGenerationGuard] = useState<GenerationGuard>(null);
   const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
   const [preferenceSettings, setPreferenceSettings] = useState<PreferenceSettings>(defaultPreferenceSettings);
   const [excludedIngredientDraft, setExcludedIngredientDraft] = useState("");
@@ -298,21 +406,28 @@ export default function Home() {
   const [recipeTimeFilter, setRecipeTimeFilter] = useState("Todos");
   const [ingredientQuery, setIngredientQuery] = useState("");
   const [ingredientCategory, setIngredientCategory] = useState("Todas");
+  const [ingredientSort, setIngredientSort] = useState<IngredientSort>("expiry_asc");
+  const [ingredientFiltersOpen, setIngredientFiltersOpen] = useState(false);
+  const [ingredientModalOpen, setIngredientModalOpen] = useState(false);
   const [selectedRecipes, setSelectedRecipes] = useState<Record<string, string>>({});
-  const [ingredientForm, setIngredientForm] = useState({ name: "", quantity: "", unit: "", category: "" });
+  const [ingredientForm, setIngredientForm] = useState<IngredientForm>(() => buildDefaultIngredientForm([]));
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("Listo para planificar.");
   const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings), [preferenceSettings]);
 
   async function refreshData() {
-    const [ingredientData, recipeData, menuData] = await Promise.all([
+    const [ingredientData, categoryData, recipeData, menuData, aiStatusData] = await Promise.all([
       api<Ingredient[]>("/ingredients"),
+      api<IngredientCategory[]>("/ingredient-categories"),
       api<Recipe[]>("/recipes"),
       api<WeeklyMenu | null>("/menus/latest"),
+      api<AiStatus>("/ai/status"),
     ]);
     setIngredients(ingredientData);
+    setIngredientCategoryOptions(categoryData);
     setRecipes(recipeData);
     setMenu(menuData);
+    setAiStatus(aiStatusData);
   }
 
   useEffect(() => {
@@ -322,6 +437,15 @@ export default function Home() {
     });
   }, []);
 
+  useEffect(() => {
+    if (!ingredientForm.categoryId && ingredientCategoryOptions.length) {
+      setIngredientForm((current) => ({
+        ...current,
+        categoryId: getDefaultIngredientCategoryId(ingredientCategoryOptions),
+      }));
+    }
+  }, [ingredientCategoryOptions, ingredientForm.categoryId]);
+
   const groupedMenu = useMemo(() => {
     const groups = new Map<number, MenuItem[]>();
     for (const item of menu?.items ?? []) {
@@ -330,14 +454,17 @@ export default function Home() {
     return Array.from(groups.entries()).sort(([left], [right]) => left - right);
   }, [menu]);
 
-  const ingredientCategories = useMemo(() => {
-    const categories = Array.from(new Set(ingredients.map((item) => item.category).filter(Boolean))) as string[];
-    return ["Todas", ...categories.sort((left, right) => left.localeCompare(right))];
-  }, [ingredients]);
+  const ingredientCategoryFilters = useMemo(() => {
+    const categoryNames = ingredientCategoryOptions.map((item) => item.name);
+    const legacyNames = ingredients
+      .map((item) => item.category)
+      .filter((value): value is string => Boolean(value && !categoryNames.includes(value)));
+    return ["Todas", ...categoryNames, ...Array.from(new Set(legacyNames)).sort((left, right) => left.localeCompare(right))];
+  }, [ingredientCategoryOptions, ingredients]);
 
   const filteredIngredients = useMemo(() => {
     const query = ingredientQuery.trim().toLowerCase();
-    return ingredients.filter((ingredient) => {
+    const filtered = ingredients.filter((ingredient) => {
       const matchesQuery =
         !query ||
         ingredient.name.toLowerCase().includes(query) ||
@@ -345,7 +472,8 @@ export default function Home() {
       const matchesCategory = ingredientCategory === "Todas" || ingredient.category === ingredientCategory;
       return matchesQuery && matchesCategory;
     });
-  }, [ingredientCategory, ingredientQuery, ingredients]);
+    return sortIngredients(filtered, ingredientSort);
+  }, [ingredientCategory, ingredientQuery, ingredientSort, ingredients]);
 
   const filteredRecipes = useMemo(() => {
     const query = recipeFilter.trim().toLowerCase();
@@ -372,7 +500,7 @@ export default function Home() {
   const dashboardDays = groupedMenu;
   const currentMenuDayIndex = getCurrentMenuDayIndex(menu);
   const latestRecipes = recipes.slice(0, 4);
-  const expiringIngredients = ingredients.slice(0, 4);
+  const expiringIngredients = useMemo(() => sortIngredients(ingredients, "expiry_asc").slice(0, 4), [ingredients]);
   const recipeTags = ["Todas", ...Array.from(new Set(recipes.flatMap((recipe) => recipe.tags))).slice(0, 10)];
   const navItems: { id: Exclude<ViewId, "recipeDetail">; label: string; description: string }[] = [
     { id: "dashboard", label: "Dashboard", description: "Resumen" },
@@ -384,7 +512,11 @@ export default function Home() {
   const quickStats = [
     { label: "Recetas guardadas", value: recipes.length.toString(), detail: "Para repetir, filtrar o versionar" },
     { label: "Ingredientes disponibles", value: ingredients.length.toString(), detail: "Base actual de la nevera" },
-    { label: "Huecos planificados", value: `${plannedSlots}/14`, detail: menu ? `Semana ${menu.week_start_date}` : "Pendiente de generar" },
+    {
+      label: "Huecos planificados",
+      value: `${plannedSlots}/14`,
+      detail: menu ? `Semana ${menu.week_start_date}` : "Pendiente de generar",
+    },
   ];
   const activeMeta =
     activeView === "recipeDetail"
@@ -459,6 +591,10 @@ export default function Home() {
   async function addIngredient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!ingredientForm.name.trim()) return;
+    if (!ingredientForm.categoryId) {
+      setMessage("Selecciona una categoria para el ingrediente.");
+      return;
+    }
     setLoading(true);
     try {
       await api<Ingredient>("/ingredients", {
@@ -466,15 +602,18 @@ export default function Home() {
         body: JSON.stringify({
           name: ingredientForm.name.trim(),
           quantity: ingredientForm.quantity.trim() || null,
-          unit: ingredientForm.unit.trim() || null,
-          category: ingredientForm.category.trim() || null,
+          category_id: ingredientForm.categoryId,
+          expires_at: ingredientForm.expiresAt || null,
         }),
       });
-      setIngredientForm({ name: "", quantity: "", unit: "", category: "" });
+      setIngredientForm(buildDefaultIngredientForm(ingredientCategoryOptions));
+      setIngredientModalOpen(false);
       setMessage("Ingrediente guardado.");
       reportClientLog("info", "Ingrediente creado desde frontend", {
         action: "create_ingredient",
         name: ingredientForm.name.trim(),
+        category_id: ingredientForm.categoryId,
+        expires_at: ingredientForm.expiresAt || null,
       });
       await refreshData();
     } catch (error) {
@@ -500,6 +639,72 @@ export default function Home() {
     }
   }
 
+  async function addDemoIngredients(focusIngredients = true) {
+    setLoading(true);
+    setMessage("Cargando ingredientes de prueba...");
+    try {
+      const created = await api<Ingredient[]>("/ingredients/demo", { method: "POST" });
+      await refreshData();
+      if (focusIngredients) {
+        setActiveView("ingredients");
+      }
+      setMessage(
+        created.length
+          ? `${created.length} ingredientes de prueba guardados en la base de datos.`
+          : "Los ingredientes de prueba ya estaban cargados.",
+      );
+      reportClientLog("info", "Ingredientes demo cargados desde frontend", {
+        action: "create_demo_ingredients",
+        created_count: created.length,
+      });
+    } catch (error) {
+      setMessage(getErrorMessage(error, "Error al cargar ingredientes de prueba."));
+      reportClientLog("error", "Error cargando ingredientes demo", { action: "create_demo_ingredients" }, error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function requestGenerateMenu() {
+    if (ingredients.length === 0) {
+      setGenerationGuard("empty");
+      reportClientLog("warning", "Generacion bloqueada por nevera vacia", { action: "open_generation_guard" });
+      return;
+    }
+
+    if (ingredients.length < MIN_INGREDIENTS_FOR_MENU) {
+      setGenerationGuard("insufficient");
+      reportClientLog("warning", "Generacion bloqueada por ingredientes insuficientes", {
+        action: "open_generation_guard",
+        ingredient_count: ingredients.length,
+        minimum_required: MIN_INGREDIENTS_FOR_MENU,
+      });
+      return;
+    }
+
+    if (aiStatus && !aiStatus.configured) {
+      setGenerationGuard("fallback");
+      reportClientLog("info", "Aviso de modo demo mostrado antes de generar menu", {
+        action: "open_generation_guard",
+        model: aiStatus.model,
+      });
+      return;
+    }
+
+    void generateMenu();
+  }
+
+  async function addDemoIngredientsFromGuard() {
+    await addDemoIngredients(false);
+    setGenerationGuard(null);
+    setMessage("Ingredientes de prueba guardados. Ya puedes generar el menu semanal.");
+  }
+
+  async function continueWithFallback() {
+    setGenerationGuard(null);
+    await generateMenu();
+  }
+
   async function generateMenu() {
     setLoading(true);
     setMessage("Generando menu semanal...");
@@ -510,7 +715,7 @@ export default function Home() {
       });
       setMenu(data);
       setActiveView("menu");
-      setMessage(`Menu generado con ${data.ai_model}.`);
+      setMessage("Menu semanal generado.");
       reportClientLog("info", "Menu generado desde frontend", {
         action: "generate_menu",
         ai_model: data.ai_model,
@@ -642,7 +847,7 @@ export default function Home() {
               <p className="font-semibold">Estado de la demo</p>
               <p className="leading-6 text-ink/70">{message}</p>
               <span className="w-fit rounded bg-yolk px-2 py-1 text-xs font-semibold text-ink">
-                {menu ? menu.ai_model : "Sin menu generado"}
+                {menu ? "Menu generado" : "Sin menu generado"}
               </span>
             </div>
           </div>
@@ -659,7 +864,7 @@ export default function Home() {
               <button
                 className="rounded-lg bg-leaf px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={loading}
-                onClick={generateMenu}
+                onClick={requestGenerateMenu}
                 type="button"
               >
                 {loading ? "Trabajando..." : "Generar menu semanal"}
@@ -673,6 +878,7 @@ export default function Home() {
                 currentMenuDayIndex={currentMenuDayIndex}
                 dashboardDays={dashboardDays}
                 expiringIngredients={expiringIngredients}
+                ingredientCount={ingredients.length}
                 latestRecipes={latestRecipes}
                 menu={menu}
                 quickStats={quickStats}
@@ -683,9 +889,10 @@ export default function Home() {
             {activeView === "menu" ? (
               <MenuView
                 groupedMenu={groupedMenu}
+                hasIngredients={ingredients.length > 0}
                 loading={loading}
                 menu={menu}
-                onGenerate={generateMenu}
+                onGenerate={requestGenerateMenu}
                 onReplace={replaceItem}
                 onUseSavedRecipe={useSavedRecipe}
                 recipes={recipes}
@@ -696,17 +903,24 @@ export default function Home() {
 
             {activeView === "ingredients" ? (
               <IngredientsView
-                categories={ingredientCategories}
+                categories={ingredientCategoryFilters}
                 category={ingredientCategory}
+                categoryOptions={ingredientCategoryOptions}
                 filteredIngredients={filteredIngredients}
-                form={ingredientForm}
+                filtersOpen={ingredientFiltersOpen}
                 loading={loading}
-                onAdd={addIngredient}
+                onAddDemoIngredients={addDemoIngredients}
                 onDelete={deleteIngredient}
+                onOpenAdd={() => {
+                  setIngredientForm(buildDefaultIngredientForm(ingredientCategoryOptions));
+                  setIngredientModalOpen(true);
+                }}
                 query={ingredientQuery}
                 setCategory={setIngredientCategory}
-                setForm={setIngredientForm}
+                setFiltersOpen={setIngredientFiltersOpen}
                 setQuery={setIngredientQuery}
+                setSort={setIngredientSort}
+                sort={ingredientSort}
                 total={ingredients.length}
               />
             ) : null}
@@ -757,7 +971,219 @@ export default function Home() {
           </div>
         </div>
       </div>
+      <GenerationGuardModal
+        guard={generationGuard}
+        ingredientCount={ingredients.length}
+        loading={loading}
+        onAddDemoIngredients={addDemoIngredientsFromGuard}
+        onCancel={() => setGenerationGuard(null)}
+        onContinueFallback={continueWithFallback}
+        onGoToIngredients={() => {
+          setGenerationGuard(null);
+          setActiveView("ingredients");
+        }}
+      />
+      <IngredientModal
+        categories={ingredientCategoryOptions}
+        form={ingredientForm}
+        loading={loading}
+        onCancel={() => setIngredientModalOpen(false)}
+        onSubmit={addIngredient}
+        open={ingredientModalOpen}
+        setForm={setIngredientForm}
+      />
     </main>
+  );
+}
+
+function GenerationGuardModal({
+  guard,
+  ingredientCount,
+  loading,
+  onAddDemoIngredients,
+  onCancel,
+  onContinueFallback,
+  onGoToIngredients,
+}: {
+  guard: GenerationGuard;
+  ingredientCount: number;
+  loading: boolean;
+  onAddDemoIngredients: () => void;
+  onCancel: () => void;
+  onContinueFallback: () => void;
+  onGoToIngredients: () => void;
+}) {
+  if (!guard) return null;
+
+  const content =
+    guard === "empty"
+      ? {
+          title: "Necesitas ingredientes para generar el menu",
+          description:
+            "No has introducido ingredientes todavia. Anade ingredientes a tu nevera o carga una base de prueba guardada en la base de datos.",
+        }
+      : guard === "insufficient"
+        ? {
+            title: "Hay pocos ingredientes en la nevera",
+            description: `Tienes ${ingredientCount} ingrediente${ingredientCount === 1 ? "" : "s"}. Para generar un menu semanal util necesitas al menos ${MIN_INGREDIENTS_FOR_MENU}.`,
+          }
+        : {
+            title: "Se usara modo demo",
+            description:
+              "No hay una clave de Gemini configurada. La app puede continuar con un fallback local para que puedas probar el flujo completo sin depender de una clave externa.",
+          };
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-ink/35 px-4 py-6" role="dialog" aria-modal="true" aria-labelledby="generation-guard-title">
+      <div className="w-full max-w-lg rounded-lg border border-line bg-white p-6 shadow-[0_24px_80px_rgba(31,37,34,0.24)]">
+        <p className="text-sm font-semibold uppercase text-leaf">Antes de generar</p>
+        <h2 id="generation-guard-title" className="mt-2 text-2xl font-bold">
+          {content.title}
+        </h2>
+        <p className="mt-3 text-sm leading-6 text-ink/70">{content.description}</p>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          {guard === "fallback" ? (
+            <button
+              className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60"
+              disabled={loading}
+              onClick={onContinueFallback}
+              type="button"
+            >
+              Continuar con modo demo
+            </button>
+          ) : (
+            <>
+              <button
+                className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-leaf hover:text-leaf"
+                disabled={loading}
+                onClick={onGoToIngredients}
+                type="button"
+              >
+                Ir a ingredientes
+              </button>
+              <button
+                className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60"
+                disabled={loading}
+                onClick={onAddDemoIngredients}
+                type="button"
+              >
+                Anadir ingredientes de prueba
+              </button>
+            </>
+          )}
+          <button
+            className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-tomato hover:text-tomato"
+            disabled={loading}
+            onClick={onCancel}
+            type="button"
+          >
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IngredientModal({
+  categories,
+  form,
+  loading,
+  onCancel,
+  onSubmit,
+  open,
+  setForm,
+}: {
+  categories: IngredientCategory[];
+  form: IngredientForm;
+  loading: boolean;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  open: boolean;
+  setForm: (form: IngredientForm) => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-ink/35 px-4 py-6" role="dialog" aria-modal="true" aria-labelledby="ingredient-modal-title">
+      <form className="w-full max-w-xl rounded-lg border border-line bg-white p-6 shadow-[0_24px_80px_rgba(31,37,34,0.24)]" onSubmit={onSubmit}>
+        <p className="text-sm font-semibold uppercase text-leaf">Nevera</p>
+        <h2 id="ingredient-modal-title" className="mt-2 text-2xl font-bold">
+          Anadir ingrediente
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-ink/70">
+          Registra alimentos reales para que el menu semanal pueda priorizar disponibilidad y caducidad.
+        </p>
+
+        <div className="mt-6 grid gap-4">
+          <label className="grid gap-2 text-sm font-semibold text-ink/70">
+            Nombre
+            <input
+              className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+              placeholder="Ej: Tomate"
+              required
+              value={form.name}
+              onChange={(event) => setForm({ ...form, name: event.target.value })}
+            />
+          </label>
+
+          <label className="grid gap-2 text-sm font-semibold text-ink/70">
+            Categoria
+            <select
+              className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+              disabled={!categories.length}
+              required
+              value={form.categoryId}
+              onChange={(event) => setForm({ ...form, categoryId: event.target.value })}
+            >
+              <option value="">Selecciona categoria</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Cantidad
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                placeholder="Ej: 500 g"
+                value={form.quantity}
+                onChange={(event) => setForm({ ...form, quantity: event.target.value })}
+              />
+            </label>
+
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Fecha de caducidad
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                type="date"
+                value={form.expiresAt}
+                onChange={(event) => setForm({ ...form, expiresAt: event.target.value })}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <button
+            className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-tomato hover:text-tomato"
+            disabled={loading}
+            onClick={onCancel}
+            type="button"
+          >
+            Cancelar
+          </button>
+          <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading || !categories.length} type="submit">
+            {loading ? "Guardando..." : "Anadir"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -765,6 +1191,7 @@ function DashboardView({
   currentMenuDayIndex,
   dashboardDays,
   expiringIngredients,
+  ingredientCount,
   latestRecipes,
   menu,
   quickStats,
@@ -773,6 +1200,7 @@ function DashboardView({
   currentMenuDayIndex: number | null;
   dashboardDays: [number, MenuItem[]][];
   expiringIngredients: Ingredient[];
+  ingredientCount: number;
   latestRecipes: Recipe[];
   menu: WeeklyMenu | null;
   quickStats: { label: string; value: string; detail: string }[];
@@ -867,18 +1295,25 @@ function DashboardView({
           <div className="rounded-lg border border-leaf/20 bg-white p-5 shadow-soft">
             <p className="text-sm font-semibold uppercase text-leaf">Sugerencias IA</p>
             <p className="mt-3 text-sm leading-6 text-ink/75">
-              {menu?.notes || "Empieza con los ingredientes cargados y evita repetir platos recientes."}
+              {menu?.notes || "Empieza cargando ingredientes y evita repetir platos recientes."}
             </p>
           </div>
           <div className="rounded-lg border border-line bg-white p-5">
             <p className="font-semibold">Ingredientes listos</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {expiringIngredients.map((ingredient) => (
-                <span key={ingredient.id} className="rounded border border-line bg-paper px-3 py-2 text-sm">
-                  {ingredient.name}
-                </span>
-              ))}
-            </div>
+            {ingredientCount === 0 ? (
+              <div className="mt-3 rounded-lg border border-dashed border-line bg-paper p-4 text-sm leading-6 text-ink/75">
+                <p>No has introducido ingredientes todavia.</p>
+                <p className="mt-2">Revisa la nevera o genera el menu para ver las opciones disponibles.</p>
+              </div>
+            ) : (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {expiringIngredients.map((ingredient) => (
+                  <span key={ingredient.id} className="rounded border border-line bg-paper px-3 py-2 text-sm">
+                    {ingredient.name}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div className="rounded-lg border border-line bg-white p-5">
             <p className="font-semibold">Recetas recientes</p>
@@ -903,6 +1338,7 @@ function DashboardView({
 
 function MenuView({
   groupedMenu,
+  hasIngredients,
   loading,
   menu,
   onGenerate,
@@ -913,6 +1349,7 @@ function MenuView({
   setSelectedRecipes,
 }: {
   groupedMenu: [number, MenuItem[]][];
+  hasIngredients: boolean;
   loading: boolean;
   menu: WeeklyMenu | null;
   onGenerate: () => void;
@@ -929,7 +1366,7 @@ function MenuView({
           <p className="text-sm font-semibold uppercase text-leaf">Plan semanal</p>
           <h2 className="text-2xl font-semibold">Comida y cena de lunes a domingo</h2>
           <p className="mt-1 text-sm text-ink/70">
-            {menu ? `Semana del ${menu.week_start_date} - ${menu.ai_model}` : "Genera tu primera propuesta."}
+            {menu ? `Semana del ${menu.week_start_date}` : "Genera tu primera propuesta."}
           </p>
         </div>
         <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onGenerate} type="button">
@@ -939,7 +1376,11 @@ function MenuView({
 
       {!menu ? (
         <div className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
-          Ya tienes ingredientes demo cargados. Genera una primera semana para empezar la prueba.
+          {hasIngredients ? (
+            <p>Genera una primera semana usando los ingredientes guardados en la nevera.</p>
+          ) : (
+            <p>No has introducido ingredientes todavia. Pulsa "Generar menu semanal" para ver las opciones disponibles.</p>
+          )}
         </div>
       ) : (
         <div className="grid gap-5">
@@ -1023,128 +1464,176 @@ function MenuView({
 function IngredientsView({
   categories,
   category,
+  categoryOptions,
   filteredIngredients,
-  form,
+  filtersOpen,
   loading,
-  onAdd,
+  onAddDemoIngredients,
   onDelete,
+  onOpenAdd,
   query,
   setCategory,
-  setForm,
+  setFiltersOpen,
   setQuery,
+  setSort,
+  sort,
   total,
 }: {
   categories: string[];
   category: string;
+  categoryOptions: IngredientCategory[];
   filteredIngredients: Ingredient[];
-  form: { name: string; quantity: string; unit: string; category: string };
+  filtersOpen: boolean;
   loading: boolean;
-  onAdd: (event: FormEvent<HTMLFormElement>) => void;
+  onAddDemoIngredients: () => void;
   onDelete: (id: string) => void;
+  onOpenAdd: () => void;
   query: string;
   setCategory: (category: string) => void;
-  setForm: (form: { name: string; quantity: string; unit: string; category: string }) => void;
+  setFiltersOpen: (open: boolean) => void;
   setQuery: (query: string) => void;
+  setSort: (sort: IngredientSort) => void;
+  sort: IngredientSort;
   total: number;
 }) {
   return (
-    <section className="grid gap-6 xl:grid-cols-[380px_1fr]">
+    <section className="space-y-5">
       <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
-        <p className="text-sm font-semibold uppercase text-leaf">Nevera</p>
-        <h2 className="mt-1 text-2xl font-semibold">Anadir ingrediente</h2>
-        <form className="mt-5 space-y-3" onSubmit={onAdd}>
-          <input
-            className="w-full rounded-lg border border-line bg-paper px-3 py-2"
-            placeholder="Ingrediente"
-            value={form.name}
-            onChange={(event) => setForm({ ...form, name: event.target.value })}
-          />
-          <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-1">
-            <input
-              className="rounded-lg border border-line bg-paper px-3 py-2"
-              placeholder="Cantidad"
-              value={form.quantity}
-              onChange={(event) => setForm({ ...form, quantity: event.target.value })}
-            />
-            <input
-              className="rounded-lg border border-line bg-paper px-3 py-2"
-              placeholder="Unidad"
-              value={form.unit}
-              onChange={(event) => setForm({ ...form, unit: event.target.value })}
-            />
-            <input
-              className="rounded-lg border border-line bg-paper px-3 py-2"
-              placeholder="Tipo"
-              value={form.category}
-              onChange={(event) => setForm({ ...form, category: event.target.value })}
-            />
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase text-leaf">Nevera</p>
+            <h2 className="mt-1 text-2xl font-semibold">Ingredientes disponibles</h2>
+            <p className="mt-2 text-sm leading-6 text-ink/70">
+              {total} ingredientes registrados. La generacion del menu usa esta nevera y prioriza los productos mas urgentes.
+            </p>
           </div>
-          <button className="w-full rounded-lg bg-leaf px-4 py-2 font-semibold text-white disabled:opacity-60" disabled={loading} type="submit">
+          <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenAdd} type="button">
             Anadir ingrediente
           </button>
-        </form>
-      </div>
+        </div>
 
-      <div className="space-y-5">
-        <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
-          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto]">
+          <input
+            className="w-full rounded-lg border border-line bg-paper px-3 py-3"
+            placeholder="Buscar por nombre o categoria"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <button
+            className={`rounded-lg border px-4 py-3 font-semibold ${
+              filtersOpen ? "border-leaf bg-leaf text-white" : "border-line bg-paper text-ink/75 hover:border-leaf hover:text-leaf"
+            }`}
+            onClick={() => setFiltersOpen(!filtersOpen)}
+            type="button"
+          >
+            Filtros
+          </button>
+        </div>
+
+        {filtersOpen ? (
+          <div className="mt-5 grid gap-5 rounded-lg border border-line bg-paper p-4 lg:grid-cols-[1fr_260px]">
             <div>
-              <p className="text-sm font-semibold uppercase text-leaf">{total} ingredientes</p>
-              <h2 className="text-2xl font-semibold">Ingredientes disponibles</h2>
-            </div>
-            <input
-              className="w-full rounded-lg border border-line bg-paper px-3 py-2 md:w-80"
-              placeholder="Buscar ingrediente o tipo"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {categories.map((item) => (
-              <button
-                key={item}
-                className={`rounded border px-3 py-2 text-sm font-semibold ${
-                  category === item ? "border-leaf bg-leaf text-white" : "border-line bg-paper text-ink/75 hover:border-leaf hover:text-leaf"
-                }`}
-                onClick={() => setCategory(item)}
-                type="button"
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2">
-          {filteredIngredients.map((ingredient) => (
-            <article key={ingredient.id} className="rounded-lg border border-line bg-white p-4 shadow-soft">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-semibold">{ingredient.name}</h3>
-                  <p className="mt-1 text-sm text-ink/65">
-                    {[ingredient.quantity, ingredient.unit].filter(Boolean).join(" ") || "Sin cantidad"}
-                  </p>
-                </div>
-                {ingredient.category ? <span className="rounded bg-yolk px-2 py-1 text-xs font-semibold">{ingredient.category}</span> : null}
+              <p className="text-xs font-semibold uppercase text-ink/55">Categoria</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {categories.map((item) => (
+                  <button
+                    key={item}
+                    className={`rounded border px-3 py-2 text-sm font-semibold ${
+                      category === item ? "border-leaf bg-leaf text-white" : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
+                    }`}
+                    onClick={() => setCategory(item)}
+                    type="button"
+                  >
+                    {item}
+                  </button>
+                ))}
               </div>
-              <button
-                className="mt-4 rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato disabled:opacity-60"
-                disabled={loading}
-                onClick={() => onDelete(ingredient.id)}
-                type="button"
+            </div>
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Ordenar por
+              <select
+                className="rounded-lg border border-line bg-white px-3 py-3 font-normal text-ink"
+                value={sort}
+                onChange={(event) => setSort(event.target.value as IngredientSort)}
               >
-                Eliminar
-              </button>
-            </article>
-          ))}
-        </div>
-
-        {filteredIngredients.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-line bg-white p-6 text-ink/75">
-            No hay ingredientes que coincidan con el filtro.
+                {ingredientSortOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         ) : null}
       </div>
+
+      {total === 0 ? (
+        <div className="rounded-lg border border-dashed border-line bg-white p-6 text-ink/75 shadow-soft">
+          <p className="text-lg font-semibold text-ink">No has introducido ingredientes todavia.</p>
+          <p className="mt-2 text-sm leading-6">Anade ingredientes manualmente o carga algunos de prueba en la base de datos.</p>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenAdd} type="button">
+              Anadir ingrediente
+            </button>
+            <button
+              className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-leaf hover:text-leaf disabled:opacity-60"
+              disabled={loading}
+              onClick={onAddDemoIngredients}
+              type="button"
+            >
+              Anadir ingredientes de prueba
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {filteredIngredients.map((ingredient) => {
+            const expiryLabel = getIngredientExpiryLabel(ingredient.expires_at);
+            const expiryTone =
+              expiryLabel === "Caducado"
+                ? "border-tomato/40 bg-tomato/10 text-tomato"
+                : expiryLabel === "Caduca pronto"
+                  ? "border-yolk bg-yolk/35 text-ink"
+                  : "border-leaf/20 bg-leaf/10 text-leaf";
+            return (
+              <article key={ingredient.id} className="rounded-lg border border-line bg-white p-4 shadow-soft transition hover:-translate-y-1 hover:border-leaf hover:shadow-[0_18px_50px_rgba(31,37,34,0.12)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-semibold">{ingredient.name}</h3>
+                    <p className="mt-1 text-sm text-ink/65">{ingredient.quantity || "Sin cantidad"}</p>
+                  </div>
+                  {ingredient.category ? <span className="rounded bg-yolk px-2 py-1 text-xs font-semibold">{ingredient.category}</span> : null}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <span className={`rounded border px-2 py-1 text-xs font-semibold ${expiryTone}`}>{expiryLabel}</span>
+                  <span className="rounded border border-line bg-paper px-2 py-1 text-xs font-semibold text-ink/65">
+                    {formatIngredientExpiry(ingredient.expires_at)}
+                  </span>
+                </div>
+                <button
+                  className="mt-4 rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato disabled:opacity-60"
+                  disabled={loading}
+                  onClick={() => onDelete(ingredient.id)}
+                  type="button"
+                >
+                  Eliminar
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      {total > 0 && filteredIngredients.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-line bg-white p-6 text-ink/75">
+          No hay ingredientes que coincidan con el filtro.
+        </div>
+      ) : null}
+      {categoryOptions.length === 0 ? (
+        <div className="rounded-lg border border-yolk bg-yolk/20 p-4 text-sm text-ink/75">
+          No se han cargado categorias todavia. Revisa la conexion con la API antes de anadir ingredientes.
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1339,7 +1828,7 @@ function RecipesView({
                   />
                   <div className="absolute inset-0 bg-ink/0 transition duration-300 group-hover:bg-ink/10" />
                   <span className="absolute left-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-leaf shadow-soft transition duration-200 group-hover:-translate-y-0.5">
-                    {recipe.source === "gemini" ? "IA" : "Fallback"}
+                    {getRecipeSourceLabel(recipe)}
                   </span>
                   <span className="absolute right-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-tomato shadow-soft transition duration-200 group-hover:-translate-y-0.5">
                     Guardada
@@ -1641,6 +2130,9 @@ function RecipeDetailView({
           </div>
 
           <div className="flex flex-wrap gap-3 xl:justify-end">
+            <span className="inline-flex items-center rounded-lg border border-leaf/30 bg-leaf/10 px-4 py-3 text-sm font-semibold text-leaf">
+              {getRecipeSourceLabel(recipe)}
+            </span>
             <span className="inline-flex items-center rounded-lg border border-line bg-white px-4 py-3 text-sm font-semibold text-tomato">
               Guardada
             </span>
