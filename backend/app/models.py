@@ -72,8 +72,9 @@ class Recipe(Base):
     prep_time_minutes: Mapped[int] = mapped_column(Integer, default=25)
     difficulty: Mapped[str] = mapped_column(String(40), default="Facil")
     servings: Mapped[int] = mapped_column(Integer, default=2)
+    image_url: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(40), default="ai")
-    is_favorite: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="recipes")

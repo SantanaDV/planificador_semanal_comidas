@@ -37,6 +37,7 @@ def build_replacement_item(
     if not names:
         names = ["verduras", "arroz", "huevos", "legumbres", "pasta", "pollo", "tomate"]
 
+    preferred_titles = _extract_context_titles(preferences, "Recetas favoritas compatibles")
     main = names[offset % len(names)]
     side = names[(offset + 2) % len(names)]
     templates = [
@@ -49,11 +50,15 @@ def build_replacement_item(
     ]
     title_template, description = templates[offset % len(templates)]
     title = title_template.format(main=main, side=side)
+    tags = ["fallback", "aprovechamiento", meal_type]
+    if preferred_titles and offset < len(preferred_titles) and preferred_titles[offset] not in previous_recipe_titles:
+        title = preferred_titles[offset]
+        description = "Receta favorita compatible priorizada sin forzar ingredientes fuera de la nevera."
+        tags.append("favorita")
 
     if title in previous_recipe_titles:
         title = f"{title} version {DAYS[day_index].lower()}"
 
-    tags = ["fallback", "aprovechamiento", meal_type]
     if preferences:
         tags.append("preferencias")
 
@@ -65,11 +70,11 @@ def build_replacement_item(
         "recipe": {
             "title": title,
             "description": description,
-            "ingredients": [main, side, "aceite de oliva", "sal", "pimienta"],
+            "ingredients": list(dict.fromkeys([main, side])),
             "steps": [
                 "Lava y corta los ingredientes principales.",
                 "Cocina la base a fuego medio hasta que este tierna.",
-                "Ajusta sal, pimienta y sirve en el momento.",
+                "Ajusta el punto final y sirve en el momento.",
             ],
             "tags": tags,
             "prep_time_minutes": 25 + (offset % 3) * 5,
@@ -77,17 +82,13 @@ def build_replacement_item(
     }
 
 
-def build_variant(recipe: dict[str, Any]) -> dict[str, Any]:
-    base_title = recipe.get("title") or "receta guardada"
-    return {
-        "title": f"Variante de {base_title}",
-        "description": "Version rapida con ajustes de ingredientes y preparacion.",
-        "ingredients": list(recipe.get("ingredients") or [])[:4] + ["hierbas frescas", "limon"],
-        "steps": [
-            "Prepara los ingredientes principales.",
-            "Saltea o asa la base con hierbas frescas.",
-            "Ajusta con limon y sirve caliente.",
-        ],
-        "tags": list(set((recipe.get("tags") or []) + ["variante", "rapida"])),
-        "prep_time_minutes": recipe.get("prep_time_minutes") or 25,
-    }
+def _extract_context_titles(preferences: str, marker: str) -> list[str]:
+    if marker not in preferences:
+        return []
+
+    for sentence in preferences.split("."):
+        if marker not in sentence:
+            continue
+        _, _, raw_titles = sentence.partition(":")
+        return [title.strip() for title in raw_titles.split(",") if title.strip()]
+    return []

@@ -13,11 +13,12 @@ Aplicacion web para crear menus semanales a partir de ingredientes disponibles, 
 - Usuario demo sin login.
 - Alta y eliminacion de ingredientes con categoria persistida, cantidad y fecha de caducidad.
 - Generacion de menu semanal con comida y cena de lunes a domingo.
+- Preferencias estructuradas con ingredientes excluidos seleccionados desde la nevera real.
 - Guardado automatico de recetas generadas.
 - Sustitucion de platos del menu.
 - Repeticion de recetas guardadas en un hueco del menu.
-- Recetario con filtro, eliminacion y variantes.
-- Detalle editable de receta con ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
+- Recetario con filtro, eliminacion, favoritas y creacion manual de recetas.
+- Detalle editable de receta con foto, ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
 - Explicacion breve de por que se eligio cada plato.
 - Estado vacio de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
 - Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
@@ -115,6 +116,8 @@ La clave no debe escribirse en codigo ni commitearse. Google recomienda tratarla
 - Si la nevera esta vacia o tiene menos de 5 ingredientes, al intentar generar menu aparece un modal con opciones para ir a Ingredientes, cargar ingredientes de prueba o cancelar.
 - Al pulsar "Anadir ingredientes de prueba" en ese aviso, el frontend llama a `POST /ingredients/demo` y el backend guarda esos ingredientes en la base de datos.
 - La generacion de menus exige al menos 5 ingredientes reales guardados, ya sean introducidos manualmente o cargados mediante el endpoint demo.
+- Los ingredientes excluidos se seleccionan desde los ingredientes existentes en la nevera. Si tras aplicar exclusiones quedan menos de 5 ingredientes disponibles, la app avisa antes de llamar a Gemini o al fallback.
+- El backend pasa como contexto recetas guardadas compatibles y prioriza las favoritas compatibles sin forzarlas si no encajan.
 - El fallback local vive separado en `backend/app/demo_fallback.py` y solo se usa cuando Gemini no esta configurado o cuando la llamada externa falla.
 - Si hay suficientes ingredientes pero no hay clave valida de Gemini, la app avisa antes de generar y permite continuar con modo demo local.
 
@@ -144,56 +147,220 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 
 1. Pulsa "Generar menu semanal". Si no hay ingredientes, la app mostrara un aviso para ir a Ingredientes o cargar ingredientes de prueba.
 2. Si hay menos de 5 ingredientes, la app pedira ampliar la nevera antes de generar.
-3. Ajusta preferencias: "cenas ligeras, comidas rapidas, evitar repetir pasta".
+3. Ajusta preferencias: tipo de dieta, restricciones, ingredientes excluidos desde tu nevera, objetivos y variedad semanal.
 4. Pulsa "Generar menu semanal".
 5. Si no hay clave valida de Gemini, acepta el aviso para continuar con modo demo.
 6. Sustituye un plato para mostrar el flujo de regeneracion.
 7. Repite una receta guardada desde el selector.
-8. Filtra el recetario, abre el detalle de una receta y edita raciones, dificultad, ingredientes o pasos.
-
-## Prompt log
-
-1. "Analiza la prueba tecnica y conviertela en checklist de entregables, arquitectura, MVP, estructura, base de datos, flujo y plan de 72 horas."
-   Funciono porque convirtio un enunciado abierto en decisiones accionables y priorizadas.
-2. "Implementa un backend FastAPI con modelos PostgreSQL para ingredientes, recetas, menus semanales y un servicio Gemini con fallback local."
-   Funciono porque separo la integracion IA del dominio y redujo el riesgo de una demo bloqueada por claves o cuota.
-3. "Construye una pantalla Next.js para el flujo ingredientes -> preferencias -> menu -> sustituciones -> recetario, priorizando MVP y claridad."
-   Funciono porque evito pantallas innecesarias y centro la UX en el recorrido que se vera en el video.
-4. "RTK es https://github.com/rtk-ai/rtk; manten el archivo Review and Test Kit y registra que el prompt log se actualiza cuando haya prompts resenables."
-   Funciono porque separo la herramienta RTK externa del checklist local `RTK.md` y fijo una regla operativa para mantener el entregable honesto.
-5. "A partir de ahora, gestiona Git con commits pequenos, Conventional Commits, revision previa de estado/diff y sin comandos destructivos."
-   Funciono porque convierte el control de versiones en una regla explicita de trabajo y evita mezclar cambios accidentales con entregables revisables.
-6. "Disena la interfaz de una aplicacion web responsive para planificacion automatica de menus semanales..."
-   Funciono como prompt de Figma AI para explorar una direccion visual SaaS con dashboard, menu semanal, ingredientes, recetas y preferencias. Se usara como referencia de UX, priorizando replicar solo lo que encaje en el MVP.
-7. "He subido el codigo completo a Diseño-web-figma; quedarnos con el tema visual, usar por objetivos lo que podamos y marcar lo que no."
-   Funciono porque convirtio la exportacion de Figma en una revision pragmatica: reutilizar composicion visual y descartar rutas, mocks y dependencias que no ayudan al MVP.
-8. "Te dejo la ejecucion de la primera vez que he hecho docker compose up; ha habido algun error, hay que ver el por que."
-   Funciono porque detecto que `next dev` con Turbopack en Docker producia panics intermitentes aunque la pagina devolviera 200. Se ajusto Docker a build de produccion con `next start` para una entrega mas estable.
-9. "Quiero que el diseno se asemeje mas a Figma, mas separado por capas: dashboard, menu semanal, ingredientes, recetas y preferencias. Tambien algunos ingredientes previamente anadidos."
-   Funciono porque marco un refinamiento visual concreto y una mejora de demo: navegacion por vistas tipo SaaS y carga controlada de ingredientes desde backend.
-10. "Implementar un sistema de logging y manejo de errores consistente para frontend y backend."
-    Funciono porque fijo el logging como preocupacion transversal: tabla `system_logs`, servicio central en backend, endpoint para eventos frontend y estandar de modulos por origen.
-11. "Me gustaria que las preferencias fueran mas como las del proyecto de Figma."
-    Funciono porque llevo la pantalla de preferencias desde un textarea libre a un formulario defendible: dieta, restricciones, ingredientes excluidos, objetivos y variedad semanal.
-12. "Generar la parte de recetas con unas cards mas parecidas a Figma y cuidar el tema de filtros."
-    Funciono porque convierte el recetario en una pantalla mas demostrable: busqueda, filtros por etiqueta, dificultad y tiempo, y cards visuales con imagen y acciones.
-13. "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones."
-    Funciono porque corrige un problema visual real: la busqueda queda alineada y los filtros avanzados aparecen solo cuando aportan valor.
-14. "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas."
-    Funciono porque convierte el dashboard en una lectura semanal completa y mejora la orientacion temporal de la demo marcando el dia actual.
-15. "Implementa la vista extendida de detalle de receta siguiendo el diseno actual y dejandola preparada para edicion real."
-    Funciono porque convierte el recetario en una superficie de producto completa: consulta, edicion persistente, metadatos y preparacion sin rehacer arquitectura.
-16. "Eliminar mocks hardcodeados y sustituirlos por estados vacios, datos demo bajo demanda y fallback documentado."
-    Funciono porque separa datos reales, demo persistente y fallback local, dejando claro al evaluador que la app no depende de arrays mock de UI para funcionar.
-
-17. "Corregir el flujo de generacion cuando faltan ingredientes o falta la clave de IA."
-    Funciono porque mejora la UX de decision: modal antes de redirigir, minimo de ingredientes y aviso previo antes de usar modo demo.
-18. "Mejorar la gestion de ingredientes con modal, categorias en base de datos, caducidad y filtros."
-    Funciono porque convierte la nevera en una fuente de datos mas realista para IA: categorias controladas, orden por caducidad y cantidad completa sin depender de texto libre de unidad.
-19. "Corregir como se muestran las recetas eliminadas en el menu semanal y en el dashboard."
-    Funciono porque cubre un caso de borde del MVP: el menu conserva su estructura aunque falte la receta y ofrece sustituir el plato sin mostrar un texto tecnico o descuidado.
+8. Filtra el recetario, abre una tarjeta, crea una receta manual, marca una favorita y edita raciones, dificultad, foto, ingredientes o pasos.
 
 ## Guion sugerido para video de 3 minutos
+
+# Prompt Log
+
+Durante el desarrollo se utilizaron herramientas de IA para analizar la prueba, definir arquitectura, diseñar la interfaz, implementar funcionalidades, depurar errores y mejorar la experiencia de usuario.
+Estos son los prompts más relevantes del proceso.
+
+---
+
+## 1. Análisis inicial, arquitectura y planificación
+
+**Herramienta:** ChatGPT / Codex
+**Objetivo:** Convertir la prueba técnica en un plan ejecutable dentro de 72 horas.
+
+**Prompt usado:**
+
+> Revisa la PRUEBA TÉCNICA - VIBE CODER INTERN.pdf y ayúdame a ejecutar esta prueba de la mejor forma posible, optimizando para una entrega sólida en 72 horas.
+>
+> La idea será una aplicación web de planificación automática de menús semanales mediante IA. El usuario podrá registrar ingredientes disponibles en la nevera y, a partir de sus preferencias, generar un menú semanal distinto cada semana, teniendo en cuenta la semana anterior para evitar repeticiones. También podrá repetir recetas, guardar recetas, filtrarlas, consultarlas, eliminarlas y sustituir platos del menú semanal.
+>
+> Quiero que trabajemos con mentalidad de prueba técnica: priorizar un MVP funcional, bien documentado, ejecutable localmente y fácil de defender, antes que añadir complejidad innecesaria.
+>
+> Antes de construir nada:
+>
+> 1. Analiza los requisitos de la prueba y conviértelos en un checklist.
+> 2. Propón la arquitectura más adecuada.
+> 3. Define el MVP exacto.
+> 4. Diseña una estructura de carpetas.
+> 5. Propón el esquema inicial de base de datos.
+> 6. Define el flujo principal de usuario.
+> 7. Propón un plan de ejecución por fases para 72 horas.
+
+**Por qué funcionó:**
+Convirtió un enunciado abierto en decisiones accionables: arquitectura, MVP, prioridades, entregables y plan de trabajo.
+
+**Qué se ajustó después:**
+Se redujo el alcance para priorizar una demo funcional, dockerizada y fácil de explicar.
+
+---
+
+## 2. Diseño inicial de interfaz con Figma AI
+
+**Herramienta:** Figma AI
+**Objetivo:** Obtener una dirección visual inicial para la aplicación.
+
+**Prompt usado:**
+
+> Diseña la interfaz de una aplicación web responsive para planificación automática de menús semanales.
+>
+> La aplicación permite al usuario registrar los ingredientes disponibles en su nevera, definir sus preferencias alimentarias y generar un menú semanal personalizado con ayuda de inteligencia artificial. El sistema debe evitar repetir platos de semanas anteriores, permitir sustituir platos del menú, guardar recetas, filtrarlas, consultarlas y reutilizarlas.
+>
+> Necesito una interfaz moderna, limpia, intuitiva y profesional, pensada para una demo de producto real. Debe parecer una aplicación SaaS actual.
+>
+> Pantallas necesarias:
+>
+> - dashboard principal
+> - menú semanal
+> - gestión de ingredientes
+> - recetas guardadas con filtros
+> - detalle de receta
+> - preferencias del usuario
+>
+> Incluye navegación clara, tarjetas, filtros, formularios simples, botones de acción destacados, estados vacíos y textos de ejemplo realistas en español.
+
+**Por qué funcionó:**
+Sirvió para explorar rápidamente una dirección visual coherente: navegación lateral, dashboard, tarjetas, filtros y estructura tipo SaaS.
+
+**Qué se ajustó después:**
+No se copió el diseño completo; se usó como referencia visual y se adaptó al MVP real implementado.
+
+---
+
+## 3. Backend, PostgreSQL e integración IA con fallback
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Crear una base backend funcional sin depender al 100% de una clave externa de IA.
+
+**Prompt usado:**
+
+> Implementa un backend con FastAPI y PostgreSQL para gestionar ingredientes, recetas, preferencias y menús semanales.
+>
+> El backend debe incluir modelos persistentes para ingredientes, recetas, menús semanales y relaciones entre platos y recetas.
+>
+> Además, crea un servicio de integración con Gemini 2.0 Flash Lite para generar menús semanales, proponer sustituciones y explicar por qué se eligió cada plato.
+>
+> Si no existe clave de Gemini configurada, la aplicación no debe fallar: debe usar un fallback local documentado para permitir una demo funcional.
+>
+> Mantén separada la lógica de dominio, persistencia e integración con IA. Añade manejo de errores y deja el comportamiento documentado en README y CLAUDE.md.
+
+**Por qué funcionó:**
+Separó la integración con IA del dominio principal y redujo el riesgo de que la demo quedara bloqueada por falta de clave o cuota.
+
+**Qué se ajustó después:**
+Se añadió un aviso previo en la UI cuando no hay clave de Gemini, en lugar de mostrar el origen IA/fallback dentro del menú generado.
+
+---
+
+## 4. Flujo de generación, ingredientes insuficientes y modo demo
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Mejorar la experiencia de usuario antes de generar un menú.
+
+**Prompt usado:**
+
+> Corrige y mejora el flujo de generación de menú semanal cuando faltan ingredientes o falta la clave de IA.
+>
+> Si el usuario intenta generar un menú y no tiene ingredientes:
+>
+> - no redirigir automáticamente a Ingredientes
+> - mostrar un modal claro
+> - explicar que primero necesita añadir ingredientes
+> - ofrecer acciones: “Ir a ingredientes”, “Añadir ingredientes de prueba” y “Cancelar”
+>
+> Añade también una validación de ingredientes mínimos. No debe generarse un menú con solo uno o dos ingredientes. Si hay pocos ingredientes, mostrar un aviso antes de llamar a Gemini o al fallback.
+>
+> Si hay suficientes ingredientes pero no hay clave de Gemini configurada:
+>
+> - mostrar un aviso antes de generar
+> - explicar que se usará modo demo/fallback local
+> - permitir continuar o cancelar
+>
+> No mostrar después en el menú etiquetas protagonistas como “Gemini real” o “fallback local”. Esa diferencia debe quedar documentada en README, no como parte principal de la UI.
+
+**Por qué funcionó:**
+Mejoró la UX de decisión: evita redirecciones inesperadas, valida mínimos útiles y mantiene la app funcional sin clave de IA.
+
+**Qué se ajustó después:**
+El botón de ingredientes de prueba se movió al modal correspondiente, para que no apareciera como acción principal fuera de contexto.
+
+---
+
+## 5. Mejora de ingredientes, preferencias y recetas para alimentar mejor la IA
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Hacer que los datos usados por la IA fueran más realistas y útiles.
+
+**Prompt usado:**
+
+> Vamos a mejorar ingredientes, preferencias y recetas para que la generación de menú sea coherente con la idea principal del producto.
+>
+> Ingredientes:
+>
+> - “Añadir ingrediente” debe abrir un modal.
+> - El modal debe incluir nombre, categoría, cantidad y fecha de caducidad con calendario.
+> - Las categorías deben venir de base de datos, con algunas precargadas.
+> - Añadir filtros por nombre, categoría, fecha de caducidad ASC/DESC y cantidad si es viable.
+>
+> Preferencias:
+>
+> - Los ingredientes excluidos deben seleccionarse desde los ingredientes existentes en la nevera.
+> - La generación del menú debe respetar esos ingredientes excluidos.
+>
+> Recetas:
+>
+> - Las tarjetas deben ser clicables y abrir el detalle.
+> - Añadir botón para crear recetas propias.
+> - Añadir sistema de favoritos.
+> - Las favoritas deben tener más peso en la generación del menú si encajan con los ingredientes disponibles.
+>
+> Generación de menú:
+>
+> - Usar ingredientes disponibles, preferencias, ingredientes excluidos, recetas guardadas, favoritas e historial.
+> - Priorizar recetas guardadas y favoritas compatibles.
+> - Generar recetas nuevas solo si no hay suficientes recetas guardadas compatibles.
+> - No inventar ingredientes principales que no estén en la nevera.
+
+**Por qué funcionó:**
+Convirtió la nevera, las preferencias y el recetario en fuentes reales para el generador, reforzando la propuesta principal del producto.
+
+**Qué se ajustó después:**
+Se separaron algunas mejoras por fases para evitar meter demasiada complejidad de golpe y mantener el MVP estable.
+
+---
+
+## 6. UI escalable para ingredientes excluidos
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Hacer usable la seleccion de ingredientes excluidos cuando la nevera crece.
+
+**Prompt usado:**
+
+> Vamos a mejorar la UI/UX de la seccion "Ingredientes excluidos" en Preferencias. La lista actual como cuadricula de tarjetas grandes no escala bien si el usuario tiene 20, 40 o mas ingredientes.
+>
+> Sustituye la cuadricula por un componente compacto con buscador, filtros rapidos por categoria, lista con checkboxes, scroll interno, resumen de seleccion, chips de ingredientes excluidos, limpiar seleccion y estado vacio con boton "Ir a ingredientes".
+
+**Por qué funcionó:**
+Convierte una lista visualmente pesada en un selector compacto y escalable sin tocar el contrato de generacion.
+
+**Qué se ajustó después:**
+Se mantuvieron los IDs reales de ingredientes y se persistieron las preferencias en el navegador para no perder exclusiones al refrescar.
+
+---
+
+## 7. Recetario manual, navegación y favoritos
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Sustituir el flujo de variantes por edicion, creacion manual y favoritas con peso en la generacion.
+
+**Prompt usado:**
+
+> Vamos a mejorar la seccion de recetas: quitar "Crear variante", hacer las tarjetas navegables, anadir "Anadir receta", permitir foto, ingredientes, cantidades, pasos, tiempo, dificultad, raciones y etiquetas, y anadir favoritas que pesen mas en la generacion si encajan.
+
+**Por qué funcionó:**
+Refuerza el recetario como fuente real del menu: el usuario puede crear, editar, abrir y marcar favoritas sin depender de un flujo secundario de variantes.
+
+**Qué se ajustó después:**
+El backend prioriza favoritas compatibles en el prompt/fallback, pero sigue permitiendo recetas nuevas si las guardadas no encajan con nevera y preferencias.
 
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
 - 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker, Gemini con fallback.

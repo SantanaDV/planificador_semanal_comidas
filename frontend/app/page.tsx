@@ -27,7 +27,9 @@ type Recipe = {
   prep_time_minutes: number;
   difficulty?: string | null;
   servings?: number | null;
+  image_url?: string | null;
   source: string;
+  is_favorite: boolean;
 };
 
 type MenuItem = {
@@ -58,13 +60,13 @@ type AiStatus = {
 
 type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "recipeDetail" | "preferences";
 type LogLevel = "info" | "warning" | "error";
-type GenerationGuard = "empty" | "insufficient" | "fallback" | null;
+type GenerationGuard = "empty" | "insufficient" | "excluded_insufficient" | "fallback" | null;
 type IngredientSort = "expiry_asc" | "expiry_desc" | "quantity_asc" | "quantity_desc";
 
 type PreferenceSettings = {
   dietType: string;
   restrictions: string[];
-  excludedIngredients: string[];
+  excludedIngredientIds: string[];
   goals: string[];
   varietyLevel: string;
 };
@@ -77,15 +79,17 @@ type RecipeIngredientDraft = {
 type RecipeEditForm = {
   title: string;
   description: string;
+  imageUrl: string;
   prepTimeMinutes: string;
   difficulty: string;
   servings: string;
   ingredients: RecipeIngredientDraft[];
   steps: string[];
   tagsText: string;
+  isFavorite: boolean;
 };
 
-type RecipeUpdatePayload = {
+type RecipeMutationPayload = {
   title: string;
   description: string;
   ingredients: string[];
@@ -94,6 +98,14 @@ type RecipeUpdatePayload = {
   prep_time_minutes: number;
   difficulty: string;
   servings: number;
+  image_url: string | null;
+  is_favorite: boolean;
+};
+
+type RecipeUpdatePayload = Partial<RecipeMutationPayload>;
+
+type RecipeCreatePayload = RecipeMutationPayload & {
+  source: "manual";
 };
 
 type IngredientForm = {
@@ -105,6 +117,7 @@ type IngredientForm = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MIN_INGREDIENTS_FOR_MENU = 5;
+const PREFERENCES_STORAGE_KEY = "menuplan-preference-settings";
 const dietOptions = [
   { name: "Equilibrada", description: "Variedad de todos los grupos alimenticios" },
   { name: "Baja en carbohidratos", description: "Reduce harinas y azucares" },
@@ -144,7 +157,7 @@ const recipeImages = [
 const defaultPreferenceSettings: PreferenceSettings = {
   dietType: "Equilibrada",
   restrictions: [],
-  excludedIngredients: [],
+  excludedIngredientIds: [],
   goals: [],
   varietyLevel: "Media",
 };
@@ -222,17 +235,41 @@ function toggleListValue(values: string[], value: string) {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
 
-function buildPreferencesSummary(settings: PreferenceSettings) {
+function buildPreferencesSummary(settings: PreferenceSettings, ingredients: Ingredient[]) {
+  const ingredientById = new Map(ingredients.map((ingredient) => [ingredient.id, ingredient.name]));
+  const excludedIngredientNames = settings.excludedIngredientIds
+    .map((ingredientId) => ingredientById.get(ingredientId))
+    .filter((name): name is string => Boolean(name));
+
   return [
     `Tipo de dieta: ${settings.dietType}.`,
     settings.restrictions.length ? `Restricciones alimentarias: ${settings.restrictions.join(", ")}.` : "",
-    settings.excludedIngredients.length ? `Ingredientes excluidos: ${settings.excludedIngredients.join(", ")}.` : "",
+    excludedIngredientNames.length ? `Ingredientes excluidos: ${excludedIngredientNames.join(", ")}.` : "",
     settings.goals.length ? `Objetivos: ${settings.goals.join(", ")}.` : "",
     `Nivel de variedad semanal: ${settings.varietyLevel}.`,
     "Evitar repetir platos recientes y priorizar ingredientes disponibles.",
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function parseSavedPreferenceSettings(value: string | null): PreferenceSettings | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<PreferenceSettings>;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.dietType !== "string") return null;
+    return {
+      dietType: parsed.dietType,
+      restrictions: Array.isArray(parsed.restrictions) ? parsed.restrictions.filter((item): item is string => typeof item === "string") : [],
+      excludedIngredientIds: Array.isArray(parsed.excludedIngredientIds)
+        ? parsed.excludedIngredientIds.filter((item): item is string => typeof item === "string")
+        : [],
+      goals: Array.isArray(parsed.goals) ? parsed.goals.filter((item): item is string => typeof item === "string") : [],
+      varietyLevel: typeof parsed.varietyLevel === "string" ? parsed.varietyLevel : defaultPreferenceSettings.varietyLevel,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getRecipeDifficulty(minutes: number, difficulty?: string | null) {
@@ -250,13 +287,13 @@ function matchesRecipeTime(recipe: Recipe, timeFilter: string) {
 }
 
 function getRecipeImage(recipe: Recipe, index: number) {
+  if (recipe.image_url?.trim()) return recipe.image_url.trim();
   const hash = Array.from(`${recipe.id}${recipe.title}`).reduce((total, letter) => total + letter.charCodeAt(0), index);
   return recipeImages[hash % recipeImages.length];
 }
 
 function getRecipeSourceLabel(recipe: Recipe) {
   const source = recipe.source.toLowerCase();
-  if (source.includes("variant")) return "Variante";
   if (source.includes("manual")) return "Manual";
   return "Generada";
 }
@@ -353,12 +390,60 @@ function buildRecipeEditForm(recipe: Recipe): RecipeEditForm {
   return {
     title: recipe.title,
     description: recipe.description,
+    imageUrl: recipe.image_url ?? "",
     prepTimeMinutes: String(recipe.prep_time_minutes || 25),
     difficulty: getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty),
     servings: String(getRecipeServings(recipe)),
     ingredients: recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [{ name: "", quantity: "" }],
     steps: recipe.steps.length ? recipe.steps : [""],
     tagsText: recipe.tags.join(", "),
+    isFavorite: recipe.is_favorite,
+  };
+}
+
+function buildEmptyRecipeForm(): RecipeEditForm {
+  return {
+    title: "",
+    description: "",
+    imageUrl: "",
+    prepTimeMinutes: "25",
+    difficulty: "Facil",
+    servings: "2",
+    ingredients: [{ name: "", quantity: "" }],
+    steps: [""],
+    tagsText: "",
+    isFavorite: false,
+  };
+}
+
+function buildRecipePayloadFromDraft(draft: RecipeEditForm, requireImage = false): RecipeMutationPayload | { error: string } {
+  const prepTimeMinutes = Number(draft.prepTimeMinutes);
+  const servings = Number(draft.servings);
+  const ingredients = draft.ingredients.map(formatIngredientDraft).filter(Boolean);
+  const steps = draft.steps.map((step) => step.trim()).filter(Boolean);
+  const tags = draft.tagsText
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+
+  if (!draft.title.trim()) return { error: "El nombre de la receta es obligatorio." };
+  if (requireImage && !draft.imageUrl.trim()) return { error: "Anade una URL de foto para la receta." };
+  if (!Number.isFinite(prepTimeMinutes) || prepTimeMinutes < 5) return { error: "El tiempo debe ser de al menos 5 minutos." };
+  if (!Number.isFinite(servings) || servings < 1) return { error: "Las raciones deben ser al menos 1." };
+  if (ingredients.length === 0) return { error: "Anade al menos un ingrediente." };
+  if (steps.length === 0) return { error: "Anade al menos un paso de preparacion." };
+
+  return {
+    title: draft.title.trim(),
+    description: draft.description.trim(),
+    ingredients,
+    steps,
+    tags,
+    prep_time_minutes: Math.round(prepTimeMinutes),
+    difficulty: draft.difficulty.trim() || getRecipeDifficulty(prepTimeMinutes),
+    servings: Math.round(servings),
+    image_url: draft.imageUrl.trim() || null,
+    is_favorite: draft.isFavorite,
   };
 }
 
@@ -399,7 +484,7 @@ export default function Home() {
   const [generationGuard, setGenerationGuard] = useState<GenerationGuard>(null);
   const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
   const [preferenceSettings, setPreferenceSettings] = useState<PreferenceSettings>(defaultPreferenceSettings);
-  const [excludedIngredientDraft, setExcludedIngredientDraft] = useState("");
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const [recipeFilter, setRecipeFilter] = useState("");
   const [recipeTagFilter, setRecipeTagFilter] = useState("Todas");
   const [recipeDifficultyFilter, setRecipeDifficultyFilter] = useState("Todas");
@@ -409,11 +494,17 @@ export default function Home() {
   const [ingredientSort, setIngredientSort] = useState<IngredientSort>("expiry_asc");
   const [ingredientFiltersOpen, setIngredientFiltersOpen] = useState(false);
   const [ingredientModalOpen, setIngredientModalOpen] = useState(false);
+  const [recipeModalOpen, setRecipeModalOpen] = useState(false);
   const [selectedRecipes, setSelectedRecipes] = useState<Record<string, string>>({});
   const [ingredientForm, setIngredientForm] = useState<IngredientForm>(() => buildDefaultIngredientForm([]));
+  const [recipeForm, setRecipeForm] = useState<RecipeEditForm>(() => buildEmptyRecipeForm());
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("Listo para planificar.");
-  const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings), [preferenceSettings]);
+  const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings, ingredients), [ingredients, preferenceSettings]);
+  const usableIngredients = useMemo(
+    () => ingredients.filter((ingredient) => !preferenceSettings.excludedIngredientIds.includes(ingredient.id)),
+    [ingredients, preferenceSettings.excludedIngredientIds],
+  );
 
   async function refreshData() {
     const [ingredientData, categoryData, recipeData, menuData, aiStatusData] = await Promise.all([
@@ -438,6 +529,19 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const savedPreferences = parseSavedPreferenceSettings(localStorage.getItem(PREFERENCES_STORAGE_KEY));
+    if (savedPreferences) {
+      setPreferenceSettings(savedPreferences);
+    }
+    setPreferencesReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesReady) return;
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(preferenceSettings));
+  }, [preferenceSettings, preferencesReady]);
+
+  useEffect(() => {
     if (!ingredientForm.categoryId && ingredientCategoryOptions.length) {
       setIngredientForm((current) => ({
         ...current,
@@ -445,6 +549,15 @@ export default function Home() {
       }));
     }
   }, [ingredientCategoryOptions, ingredientForm.categoryId]);
+
+  useEffect(() => {
+    const ingredientIds = new Set(ingredients.map((ingredient) => ingredient.id));
+    setPreferenceSettings((current) => {
+      const excludedIngredientIds = current.excludedIngredientIds.filter((ingredientId) => ingredientIds.has(ingredientId));
+      if (excludedIngredientIds.length === current.excludedIngredientIds.length) return current;
+      return { ...current, excludedIngredientIds };
+    });
+  }, [ingredients]);
 
   const groupedMenu = useMemo(() => {
     const groups = new Map<number, MenuItem[]>();
@@ -510,7 +623,7 @@ export default function Home() {
     { id: "preferences", label: "Preferencias", description: "Personaliza tu experiencia de planificacion" },
   ];
   const quickStats = [
-    { label: "Recetas guardadas", value: recipes.length.toString(), detail: "Para repetir, filtrar o versionar" },
+    { label: "Recetas guardadas", value: recipes.length.toString(), detail: "Para repetir, filtrar, editar o marcar favoritas" },
     { label: "Ingredientes disponibles", value: ingredients.length.toString(), detail: "Base actual de la nevera" },
     {
       label: "Huecos planificados",
@@ -532,7 +645,7 @@ export default function Home() {
       action: "update_preferences",
       diet_type: preferenceSettings.dietType,
       restrictions_count: preferenceSettings.restrictions.length,
-      excluded_ingredients_count: preferenceSettings.excludedIngredients.length,
+      excluded_ingredients_count: preferenceSettings.excludedIngredientIds.length,
       goals_count: preferenceSettings.goals.length,
       variety_level: preferenceSettings.varietyLevel,
     });
@@ -585,6 +698,48 @@ export default function Home() {
       return null;
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function createRecipe(payload: RecipeCreatePayload) {
+    setLoading(true);
+    try {
+      const data = await api<Recipe>("/recipes", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setRecipes((current) => [data, ...current]);
+      setSelectedRecipeId(data.id);
+      setRecipeModalOpen(false);
+      setRecipeForm(buildEmptyRecipeForm());
+      setActiveView("recipeDetail");
+      setMessage("Receta creada y guardada.");
+      reportClientLog("info", "Receta creada manualmente desde frontend", {
+        action: "create_recipe",
+        recipe_id: data.id,
+        is_favorite: data.is_favorite,
+      });
+      return data;
+    } catch (error) {
+      setMessage(getErrorMessage(error, "Error al crear receta."));
+      reportClientLog("error", "Error creando receta manual desde frontend", { action: "create_recipe" }, error);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleFavoriteRecipe(recipe: Recipe, event?: { stopPropagation: () => void }) {
+    event?.stopPropagation();
+    const nextFavorite = !recipe.is_favorite;
+    const updated = await updateRecipe(recipe.id, { is_favorite: nextFavorite });
+    if (updated) {
+      setMessage(nextFavorite ? "Receta marcada como favorita." : "Receta quitada de favoritos.");
+      reportClientLog("info", "Favorito de receta actualizado desde frontend", {
+        action: "toggle_recipe_favorite",
+        recipe_id: recipe.id,
+        is_favorite: nextFavorite,
+      });
     }
   }
 
@@ -682,6 +837,18 @@ export default function Home() {
       return;
     }
 
+    if (usableIngredients.length < MIN_INGREDIENTS_FOR_MENU) {
+      setGenerationGuard("excluded_insufficient");
+      reportClientLog("warning", "Generacion bloqueada por exclusiones de ingredientes", {
+        action: "open_generation_guard",
+        ingredient_count: ingredients.length,
+        usable_ingredient_count: usableIngredients.length,
+        excluded_ingredient_count: preferenceSettings.excludedIngredientIds.length,
+        minimum_required: MIN_INGREDIENTS_FOR_MENU,
+      });
+      return;
+    }
+
     if (aiStatus && !aiStatus.configured) {
       setGenerationGuard("fallback");
       reportClientLog("info", "Aviso de modo demo mostrado antes de generar menu", {
@@ -711,7 +878,7 @@ export default function Home() {
     try {
       const data = await api<WeeklyMenu>("/menus/generate", {
         method: "POST",
-        body: JSON.stringify({ preferences }),
+        body: JSON.stringify({ preferences, excluded_ingredient_ids: preferenceSettings.excludedIngredientIds }),
       });
       setMenu(data);
       setActiveView("menu");
@@ -740,7 +907,7 @@ export default function Home() {
     try {
       const data = await api<WeeklyMenu>(`/menus/${menu.id}/items/${itemId}/replace`, {
         method: "POST",
-        body: JSON.stringify({ preferences }),
+        body: JSON.stringify({ preferences, excluded_ingredient_ids: preferenceSettings.excludedIngredientIds }),
       });
       setMenu(data);
       setMessage("Plato sustituido.");
@@ -772,24 +939,6 @@ export default function Home() {
     } catch (error) {
       setMessage(getErrorMessage(error, "Error al repetir receta."));
       reportClientLog("error", "Error reutilizando receta guardada", { action: "use_saved_recipe", item_id: itemId }, error);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function createVariant(recipeId: string) {
-    setLoading(true);
-    try {
-      await api<Recipe>(`/recipes/${recipeId}/variant`, {
-        method: "POST",
-        body: JSON.stringify({ preferences }),
-      });
-      setMessage("Variante guardada en el recetario.");
-      reportClientLog("info", "Variante creada desde frontend", { action: "create_recipe_variant", recipe_id: recipeId });
-      await refreshRecipes();
-    } catch (error) {
-      setMessage(getErrorMessage(error, "Error al crear variante."));
-      reportClientLog("error", "Error creando variante desde frontend", { action: "create_recipe_variant", recipe_id: recipeId }, error);
     } finally {
       setLoading(false);
     }
@@ -932,9 +1081,13 @@ export default function Home() {
                 filteredRecipes={filteredRecipes}
                 difficultyFilter={recipeDifficultyFilter}
                 loading={loading}
-                onCreateVariant={createVariant}
                 onDeleteRecipe={deleteRecipe}
                 onOpenRecipe={openRecipeDetail}
+                onOpenCreateRecipe={() => {
+                  setRecipeForm(buildEmptyRecipeForm());
+                  setRecipeModalOpen(true);
+                }}
+                onToggleFavorite={toggleFavoriteRecipe}
                 recipeFilter={recipeFilter}
                 recipeTags={recipeTags}
                 setDifficultyFilter={setRecipeDifficultyFilter}
@@ -960,12 +1113,12 @@ export default function Home() {
 
             {activeView === "preferences" ? (
               <PreferencesView
-                excludedIngredientDraft={excludedIngredientDraft}
+                ingredients={ingredients}
                 loading={loading}
                 message={message}
+                onGoToIngredients={() => setActiveView("ingredients")}
                 onSave={savePreferences}
                 preferencesSummary={preferences}
-                setExcludedIngredientDraft={setExcludedIngredientDraft}
                 setSettings={setPreferenceSettings}
                 settings={preferenceSettings}
               />
@@ -984,6 +1137,11 @@ export default function Home() {
           setGenerationGuard(null);
           setActiveView("ingredients");
         }}
+        onGoToPreferences={() => {
+          setGenerationGuard(null);
+          setActiveView("preferences");
+        }}
+        usableIngredientCount={usableIngredients.length}
       />
       <IngredientModal
         categories={ingredientCategoryOptions}
@@ -993,6 +1151,14 @@ export default function Home() {
         onSubmit={addIngredient}
         open={ingredientModalOpen}
         setForm={setIngredientForm}
+      />
+      <RecipeModal
+        form={recipeForm}
+        loading={loading}
+        onCancel={() => setRecipeModalOpen(false)}
+        onSubmit={createRecipe}
+        open={recipeModalOpen}
+        setForm={setRecipeForm}
       />
     </main>
   );
@@ -1006,6 +1172,8 @@ function GenerationGuardModal({
   onCancel,
   onContinueFallback,
   onGoToIngredients,
+  onGoToPreferences,
+  usableIngredientCount,
 }: {
   guard: GenerationGuard;
   ingredientCount: number;
@@ -1014,6 +1182,8 @@ function GenerationGuardModal({
   onCancel: () => void;
   onContinueFallback: () => void;
   onGoToIngredients: () => void;
+  onGoToPreferences: () => void;
+  usableIngredientCount: number;
 }) {
   if (!guard) return null;
 
@@ -1029,6 +1199,11 @@ function GenerationGuardModal({
             title: "Hay pocos ingredientes en la nevera",
             description: `Tienes ${ingredientCount} ingrediente${ingredientCount === 1 ? "" : "s"}. Para generar un menu semanal util necesitas al menos ${MIN_INGREDIENTS_FOR_MENU}.`,
           }
+        : guard === "excluded_insufficient"
+          ? {
+              title: "Exclusiones demasiado restrictivas",
+              description: `Tras aplicar tus exclusiones quedan ${usableIngredientCount} ingredientes disponibles. Reduce exclusiones o anade mas ingredientes antes de generar el menu semanal.`,
+            }
         : {
             title: "Se usara modo demo",
             description:
@@ -1056,6 +1231,16 @@ function GenerationGuardModal({
             </button>
           ) : (
             <>
+              {guard === "excluded_insufficient" ? (
+                <button
+                  className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-leaf hover:text-leaf"
+                  disabled={loading}
+                  onClick={onGoToPreferences}
+                  type="button"
+                >
+                  Revisar preferencias
+                </button>
+              ) : null}
               <button
                 className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-leaf hover:text-leaf"
                 disabled={loading}
@@ -1182,6 +1367,255 @@ function IngredientModal({
           </button>
           <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading || !categories.length} type="submit">
             {loading ? "Guardando..." : "Anadir"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function RecipeModal({
+  form,
+  loading,
+  onCancel,
+  onSubmit,
+  open,
+  setForm,
+}: {
+  form: RecipeEditForm;
+  loading: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: RecipeCreatePayload) => Promise<Recipe | null>;
+  open: boolean;
+  setForm: (form: RecipeEditForm) => void;
+}) {
+  const [localError, setLocalError] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setLocalError("");
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
+    setForm({
+      ...form,
+      ingredients: form.ingredients.map((ingredient, itemIndex) =>
+        itemIndex === index ? { ...ingredient, [field]: value } : ingredient,
+      ),
+    });
+  }
+
+  function updateStep(index: number, value: string) {
+    setForm({
+      ...form,
+      steps: form.steps.map((step, itemIndex) => (itemIndex === index ? value : step)),
+    });
+  }
+
+  async function submitRecipe(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const payload = buildRecipePayloadFromDraft(form, true);
+    if ("error" in payload) {
+      setLocalError(payload.error);
+      return;
+    }
+    const created = await onSubmit({ ...payload, source: "manual" });
+    if (!created) {
+      setLocalError("No se pudo crear la receta.");
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-ink/35 px-4 py-6" role="dialog" aria-modal="true" aria-labelledby="recipe-modal-title">
+      <form className="w-full max-w-4xl rounded-lg border border-line bg-white p-6 shadow-[0_24px_80px_rgba(31,37,34,0.24)]" onSubmit={submitRecipe}>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase text-leaf">Recetario</p>
+            <h2 id="recipe-modal-title" className="mt-2 text-2xl font-bold">
+              Anadir receta
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-ink/70">
+              Guarda una receta propia para consultarla, editarla y priorizarla si encaja con tu nevera.
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 rounded-lg border border-line bg-paper px-3 py-2 text-sm font-semibold">
+            <input
+              checked={form.isFavorite}
+              className="h-4 w-4 accent-tomato"
+              onChange={(event) => setForm({ ...form, isFavorite: event.target.checked })}
+              type="checkbox"
+            />
+            Favorita
+          </label>
+        </div>
+
+        {localError ? <p className="mt-4 rounded-lg border border-tomato/30 bg-tomato/5 px-4 py-3 text-sm text-tomato">{localError}</p> : null}
+
+        <div className="mt-6 grid max-h-[72vh] gap-5 overflow-y-auto pr-1">
+          <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Nombre
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                placeholder="Ej: Ensalada templada de garbanzos"
+                value={form.title}
+                onChange={(event) => setForm({ ...form, title: event.target.value })}
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Foto
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                placeholder="https://images.unsplash.com/..."
+                value={form.imageUrl}
+                onChange={(event) => setForm({ ...form, imageUrl: event.target.value })}
+              />
+            </label>
+          </div>
+
+          <label className="grid gap-2 text-sm font-semibold text-ink/70">
+            Descripcion
+            <textarea
+              className="min-h-24 rounded-lg border border-line bg-paper px-3 py-3 font-normal leading-6 text-ink"
+              placeholder="Plato rapido, saciante y facil de adaptar con verduras de temporada."
+              value={form.description}
+              onChange={(event) => setForm({ ...form, description: event.target.value })}
+            />
+          </label>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Tiempo estimado
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                min={5}
+                type="number"
+                value={form.prepTimeMinutes}
+                onChange={(event) => setForm({ ...form, prepTimeMinutes: event.target.value })}
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Dificultad
+              <select
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                value={form.difficulty}
+                onChange={(event) => setForm({ ...form, difficulty: event.target.value })}
+              >
+                {recipeDifficultyOptions.filter((item) => item !== "Todas").map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2 text-sm font-semibold text-ink/70">
+              Raciones
+              <input
+                className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+                min={1}
+                type="number"
+                value={form.servings}
+                onChange={(event) => setForm({ ...form, servings: event.target.value })}
+              />
+            </label>
+          </div>
+
+          <div className="rounded-lg border border-line bg-paper p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-semibold">Ingredientes y cantidades</p>
+              <button
+                className="rounded-lg border border-leaf bg-white px-3 py-2 text-sm font-semibold text-leaf"
+                onClick={() => setForm({ ...form, ingredients: [...form.ingredients, { name: "", quantity: "" }] })}
+                type="button"
+              >
+                Anadir ingrediente
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              {form.ingredients.map((ingredient, index) => (
+                <div key={index} className="grid gap-2 md:grid-cols-[1fr_180px_auto]">
+                  <input
+                    className="rounded-lg border border-line bg-white px-3 py-2"
+                    placeholder="Ingrediente"
+                    value={ingredient.name}
+                    onChange={(event) => updateIngredient(index, "name", event.target.value)}
+                  />
+                  <input
+                    className="rounded-lg border border-line bg-white px-3 py-2"
+                    placeholder="Cantidad"
+                    value={ingredient.quantity}
+                    onChange={(event) => updateIngredient(index, "quantity", event.target.value)}
+                  />
+                  <button
+                    className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato"
+                    onClick={() => setForm({ ...form, ingredients: form.ingredients.filter((_, itemIndex) => itemIndex !== index) })}
+                    type="button"
+                  >
+                    Quitar
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-line bg-paper p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-semibold">Pasos</p>
+              <button
+                className="rounded-lg border border-leaf bg-white px-3 py-2 text-sm font-semibold text-leaf"
+                onClick={() => setForm({ ...form, steps: [...form.steps, ""] })}
+                type="button"
+              >
+                Anadir paso
+              </button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              {form.steps.map((step, index) => (
+                <div key={index} className="grid gap-2 md:grid-cols-[40px_1fr_auto]">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-leaf/10 text-sm font-semibold text-leaf">{index + 1}</span>
+                  <textarea
+                    className="min-h-20 rounded-lg border border-line bg-white px-3 py-2 text-sm leading-6"
+                    placeholder="Describe este paso"
+                    value={step}
+                    onChange={(event) => updateStep(index, event.target.value)}
+                  />
+                  <button
+                    className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato md:self-start"
+                    onClick={() => setForm({ ...form, steps: form.steps.filter((_, itemIndex) => itemIndex !== index) })}
+                    type="button"
+                  >
+                    Quitar
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <label className="grid gap-2 text-sm font-semibold text-ink/70">
+            Etiquetas
+            <input
+              className="rounded-lg border border-line bg-paper px-3 py-3 font-normal text-ink"
+              placeholder="rapida, legumbres, aprovechamiento"
+              value={form.tagsText}
+              onChange={(event) => setForm({ ...form, tagsText: event.target.value })}
+            />
+          </label>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <button
+            className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-tomato hover:text-tomato"
+            disabled={loading}
+            onClick={onCancel}
+            type="button"
+          >
+            Cancelar
+          </button>
+          <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} type="submit">
+            {loading ? "Guardando..." : "Anadir receta"}
           </button>
         </div>
       </form>
@@ -1687,9 +2121,10 @@ function RecipesView({
   difficultyFilter,
   filteredRecipes,
   loading,
-  onCreateVariant,
   onDeleteRecipe,
   onOpenRecipe,
+  onOpenCreateRecipe,
+  onToggleFavorite,
   recipeFilter,
   recipeTags,
   setDifficultyFilter,
@@ -1703,9 +2138,10 @@ function RecipesView({
   difficultyFilter: string;
   filteredRecipes: Recipe[];
   loading: boolean;
-  onCreateVariant: (recipeId: string) => void;
   onDeleteRecipe: (recipeId: string) => void;
   onOpenRecipe: (recipe: Recipe) => void;
+  onOpenCreateRecipe: () => void;
+  onToggleFavorite: (recipe: Recipe, event?: { stopPropagation: () => void }) => void;
   recipeFilter: string;
   recipeTags: string[];
   setDifficultyFilter: (filter: string) => void;
@@ -1723,12 +2159,17 @@ function RecipesView({
   return (
     <section className="space-y-6">
       <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
-        <div className="flex flex-col gap-1">
-          <p className="text-sm font-semibold uppercase text-leaf">Biblioteca</p>
-          <h2 className="text-2xl font-semibold">Recetas guardadas</h2>
-          <p className="text-sm text-ink/70">
-            {filteredRecipes.length} de {totalRecipes} recetas disponibles
-          </p>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-semibold uppercase text-leaf">Biblioteca</p>
+            <h2 className="text-2xl font-semibold">Recetas guardadas</h2>
+            <p className="text-sm text-ink/70">
+              {filteredRecipes.length} de {totalRecipes} recetas disponibles
+            </p>
+          </div>
+          <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenCreateRecipe} type="button">
+            Anadir receta
+          </button>
         </div>
 
         <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto]">
@@ -1853,7 +2294,7 @@ function RecipesView({
       {filteredRecipes.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
           {totalRecipes === 0
-            ? "Genera un menu para llenar el recetario con recetas guardadas."
+            ? "Genera un menu o anade tu primera receta manual para llenar el recetario."
             : "No hay recetas que coincidan con los filtros actuales."}
         </div>
       ) : (
@@ -1863,7 +2304,17 @@ function RecipesView({
             return (
               <article
                 key={recipe.id}
-                className="group overflow-hidden rounded-lg border border-line bg-white shadow-soft transition duration-200 ease-out hover:-translate-y-1 hover:border-leaf/60 hover:shadow-[0_18px_38px_rgba(31,37,34,0.14)]"
+                className="group cursor-pointer overflow-hidden rounded-lg border border-line bg-white shadow-soft transition duration-200 ease-out hover:-translate-y-1 hover:border-leaf/60 hover:shadow-[0_18px_38px_rgba(31,37,34,0.14)] focus:outline-none focus:ring-2 focus:ring-leaf/40"
+                onClick={() => onOpenRecipe(recipe)}
+                onKeyDown={(event) => {
+                  if (event.currentTarget !== event.target) return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpenRecipe(recipe);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
               >
                 <div className="relative h-44 overflow-hidden bg-leaf/10">
                   <img
@@ -1875,8 +2326,8 @@ function RecipesView({
                   <span className="absolute left-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-leaf shadow-soft transition duration-200 group-hover:-translate-y-0.5">
                     {getRecipeSourceLabel(recipe)}
                   </span>
-                  <span className="absolute right-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-tomato shadow-soft transition duration-200 group-hover:-translate-y-0.5">
-                    Guardada
+                  <span className={`absolute right-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold shadow-soft transition duration-200 group-hover:-translate-y-0.5 ${recipe.is_favorite ? "text-tomato" : "text-ink/65"}`}>
+                    {recipe.is_favorite ? "Favorita" : "Guardada"}
                   </span>
                 </div>
 
@@ -1915,23 +2366,33 @@ function RecipesView({
                     <button
                       className="rounded-lg bg-leaf px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
                       disabled={loading}
-                      onClick={() => onOpenRecipe(recipe)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenRecipe(recipe);
+                      }}
                       type="button"
                     >
-                      Ver detalle
+                      Editar
                     </button>
                     <button
-                      className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf disabled:opacity-60"
+                      className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
+                        recipe.is_favorite
+                          ? "border-tomato bg-tomato/10 text-tomato"
+                          : "border-line text-ink/70 hover:border-tomato hover:text-tomato"
+                      }`}
                       disabled={loading}
-                      onClick={() => onCreateVariant(recipe.id)}
+                      onClick={(event) => onToggleFavorite(recipe, event)}
                       type="button"
                     >
-                      Crear variante
+                      {recipe.is_favorite ? "Favorita" : "Favorito"}
                     </button>
                     <button
                       className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato disabled:opacity-60"
                       disabled={loading}
-                      onClick={() => onDeleteRecipe(recipe.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDeleteRecipe(recipe.id);
+                      }}
                       type="button"
                     >
                       Eliminar
@@ -2037,46 +2498,13 @@ function RecipeDetailView({
     event.preventDefault();
     if (!recipe) return;
     if (!draft) return;
-    const prepTimeMinutes = Number(draft.prepTimeMinutes);
-    const nextServings = Number(draft.servings);
-    const ingredients = draft.ingredients.map(formatIngredientDraft).filter(Boolean);
-    const steps = draft.steps.map((step) => step.trim()).filter(Boolean);
-    const tags = draft.tagsText
-      .split(",")
-      .map((tag) => tag.trim())
-      .filter(Boolean);
-
-    if (!draft.title.trim()) {
-      setLocalError("El nombre de la receta es obligatorio.");
-      return;
-    }
-    if (!Number.isFinite(prepTimeMinutes) || prepTimeMinutes < 5) {
-      setLocalError("El tiempo debe ser de al menos 5 minutos.");
-      return;
-    }
-    if (!Number.isFinite(nextServings) || nextServings < 1) {
-      setLocalError("Las raciones deben ser al menos 1.");
-      return;
-    }
-    if (ingredients.length === 0) {
-      setLocalError("Anade al menos un ingrediente.");
-      return;
-    }
-    if (steps.length === 0) {
-      setLocalError("Anade al menos un paso de preparacion.");
+    const payload = buildRecipePayloadFromDraft(draft);
+    if ("error" in payload) {
+      setLocalError(payload.error);
       return;
     }
 
-    const updated = await onUpdateRecipe(recipe.id, {
-      title: draft.title.trim(),
-      description: draft.description.trim(),
-      ingredients,
-      steps,
-      tags,
-      prep_time_minutes: Math.round(prepTimeMinutes),
-      difficulty: draft.difficulty.trim() || getRecipeDifficulty(prepTimeMinutes),
-      servings: Math.round(nextServings),
-    });
+    const updated = await onUpdateRecipe(recipe.id, payload);
     if (!updated) {
       setLocalError("No se pudo guardar la receta.");
       return;
@@ -2084,6 +2512,18 @@ function RecipeDetailView({
     setLocalError("");
     setIsEditing(false);
     setDraft(buildRecipeEditForm(updated));
+  }
+
+  async function toggleDetailFavorite() {
+    if (!recipe) return;
+    if (isEditing) {
+      setDraft((current) => (current ? { ...current, isFavorite: !current.isFavorite } : current));
+      return;
+    }
+    const updated = await onUpdateRecipe(recipe.id, { is_favorite: !recipe.is_favorite });
+    if (updated) {
+      setDraft(buildRecipeEditForm(updated));
+    }
   }
 
   return (
@@ -2112,6 +2552,15 @@ function RecipeDetailView({
                     className="min-h-24 rounded-lg border border-line bg-paper px-4 py-3 text-sm font-normal leading-6 text-ink"
                     value={draft.description}
                     onChange={(event) => setDraft((current) => (current ? { ...current, description: event.target.value } : current))}
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-semibold text-ink/70">
+                  Foto
+                  <input
+                    className="rounded-lg border border-line bg-paper px-4 py-3 text-sm font-normal text-ink"
+                    placeholder="https://images.unsplash.com/..."
+                    value={draft.imageUrl}
+                    onChange={(event) => setDraft((current) => (current ? { ...current, imageUrl: event.target.value } : current))}
                   />
                 </label>
               </div>
@@ -2179,8 +2628,16 @@ function RecipeDetailView({
               {getRecipeSourceLabel(recipe)}
             </span>
             <span className="inline-flex items-center rounded-lg border border-line bg-white px-4 py-3 text-sm font-semibold text-tomato">
-              Guardada
+              {recipe.is_favorite ? "Favorita" : "Guardada"}
             </span>
+            <button
+              className="rounded-lg border border-tomato/40 bg-white px-5 py-3 font-semibold text-tomato disabled:opacity-60"
+              disabled={loading}
+              onClick={toggleDetailFavorite}
+              type="button"
+            >
+              {draft.isFavorite ? "Quitar favorito" : "Marcar favorita"}
+            </button>
             <button
               className="rounded-lg bg-leaf px-5 py-3 font-semibold text-white disabled:opacity-60"
               disabled={loading}
@@ -2364,34 +2821,50 @@ function RecipeDetailView({
 }
 
 function PreferencesView({
-  excludedIngredientDraft,
+  ingredients,
   loading,
   message,
+  onGoToIngredients,
   onSave,
   preferencesSummary,
-  setExcludedIngredientDraft,
   setSettings,
   settings,
 }: {
-  excludedIngredientDraft: string;
+  ingredients: Ingredient[];
   loading: boolean;
   message: string;
+  onGoToIngredients: () => void;
   onSave: () => void;
   preferencesSummary: string;
-  setExcludedIngredientDraft: (value: string) => void;
   setSettings: (updater: (settings: PreferenceSettings) => PreferenceSettings) => void;
   settings: PreferenceSettings;
 }) {
-  function addExcludedIngredient(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const value = excludedIngredientDraft.trim();
-    if (!value) return;
-    setSettings((current) => {
-      const exists = current.excludedIngredients.some((ingredient) => ingredient.toLowerCase() === value.toLowerCase());
-      return exists ? current : { ...current, excludedIngredients: [...current.excludedIngredients, value] };
+  const [excludedIngredientCategory, setExcludedIngredientCategory] = useState("Todos");
+  const [excludedIngredientSearch, setExcludedIngredientSearch] = useState("");
+  const excludedIngredientCategories = useMemo(() => {
+    const categories = ingredients
+      .map((ingredient) => ingredient.category)
+      .filter((category): category is string => Boolean(category));
+    return ["Todos", ...Array.from(new Set(categories)).sort((left, right) => left.localeCompare(right))];
+  }, [ingredients]);
+  const selectedExcludedIngredients = useMemo(
+    () => settings.excludedIngredientIds.map((id) => ingredients.find((ingredient) => ingredient.id === id)).filter((ingredient): ingredient is Ingredient => Boolean(ingredient)),
+    [ingredients, settings.excludedIngredientIds],
+  );
+  const filteredExcludedIngredients = useMemo(() => {
+    const search = excludedIngredientSearch.trim().toLowerCase();
+    return ingredients.filter((ingredient) => {
+      const matchesSearch = !search || ingredient.name.toLowerCase().includes(search);
+      const matchesCategory = excludedIngredientCategory === "Todos" || ingredient.category === excludedIngredientCategory;
+      return matchesSearch && matchesCategory;
     });
-    setExcludedIngredientDraft("");
-  }
+  }, [excludedIngredientCategory, excludedIngredientSearch, ingredients]);
+
+  useEffect(() => {
+    if (!excludedIngredientCategories.includes(excludedIngredientCategory)) {
+      setExcludedIngredientCategory("Todos");
+    }
+  }, [excludedIngredientCategories, excludedIngredientCategory]);
 
   return (
     <section className="mx-auto max-w-5xl space-y-6">
@@ -2451,36 +2924,145 @@ function PreferencesView({
       </div>
 
       <div className="rounded-lg border border-line bg-white p-6 shadow-soft">
-        <h2 className="text-xl font-semibold">Ingredientes excluidos</h2>
-        <p className="mt-2 text-sm leading-6 text-ink/70">Ingredientes que no quieres que aparezcan en tus menus</p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {settings.excludedIngredients.map((ingredient) => (
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">Ingredientes excluidos</h2>
+            <p className="mt-2 text-sm leading-6 text-ink/70">
+              Marca ingredientes de tu nevera que no quieres que se usen al generar el menu.
+            </p>
+          </div>
+          <div className="rounded-lg border border-line bg-paper px-4 py-3 text-sm md:text-right">
+            <p className="font-semibold">
+              {selectedExcludedIngredients.length} ingrediente{selectedExcludedIngredients.length === 1 ? "" : "s"} excluido
+              {selectedExcludedIngredients.length === 1 ? "" : "s"}
+            </p>
+            <p className="mt-1 text-xs text-ink/60">
+              {ingredients.length ? `${filteredExcludedIngredients.length} visibles de ${ingredients.length}` : "Nevera vacia"}
+            </p>
+          </div>
+        </div>
+
+        {selectedExcludedIngredients.length ? (
+          <div className="mt-5 rounded-lg border border-line bg-paper px-4 py-3">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <p className="text-sm font-semibold">Seleccionados</p>
+              <button
+                className="w-fit rounded-lg border border-line bg-white px-3 py-2 text-sm font-semibold text-ink/70 hover:border-tomato hover:text-tomato"
+                onClick={() => setSettings((current) => ({ ...current, excludedIngredientIds: [] }))}
+                type="button"
+              >
+                Limpiar seleccion
+              </button>
+            </div>
+            <div className="mt-3 flex max-h-24 flex-wrap gap-2 overflow-y-auto pr-1">
+              {selectedExcludedIngredients.map((ingredient) => (
+                <button
+                  key={ingredient.id}
+                  className="rounded-lg bg-tomato/10 px-3 py-2 text-sm font-semibold text-tomato hover:bg-tomato hover:text-white"
+                  onClick={() =>
+                    setSettings((current) => ({
+                      ...current,
+                      excludedIngredientIds: current.excludedIngredientIds.filter((id) => id !== ingredient.id),
+                    }))
+                  }
+                  type="button"
+                >
+                  {ingredient.name} x
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {ingredients.length ? (
+          <>
+            <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+              <label className="grid gap-2 text-sm font-semibold uppercase text-ink/60">
+                Buscar ingrediente
+                <input
+                  className="min-h-11 rounded-lg border border-line bg-paper px-4 py-2 text-base font-normal normal-case text-ink outline-none transition focus:border-leaf focus:bg-white"
+                  placeholder="Buscar por nombre"
+                  value={excludedIngredientSearch}
+                  onChange={(event) => setExcludedIngredientSearch(event.target.value)}
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {excludedIngredientCategories.map((category) => (
+                  <button
+                    key={category}
+                    className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                      excludedIngredientCategory === category
+                        ? "border-leaf bg-leaf text-white"
+                        : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
+                    }`}
+                    onClick={() => setExcludedIngredientCategory(category)}
+                    type="button"
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 max-h-80 overflow-y-auto rounded-lg border border-line">
+              {filteredExcludedIngredients.length ? (
+                <div className="divide-y divide-line">
+                  {filteredExcludedIngredients.map((ingredient) => {
+                    const selected = settings.excludedIngredientIds.includes(ingredient.id);
+                    return (
+                      <label
+                        key={ingredient.id}
+                        className={`grid cursor-pointer grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-3 transition ${
+                          selected ? "bg-tomato/5" : "bg-white hover:bg-paper"
+                        }`}
+                      >
+                        <input
+                          checked={selected}
+                          className="h-4 w-4 accent-tomato"
+                          onChange={() =>
+                            setSettings((current) => ({
+                              ...current,
+                              excludedIngredientIds: toggleListValue(current.excludedIngredientIds, ingredient.id),
+                            }))
+                          }
+                          type="checkbox"
+                        />
+                        <span className="min-w-0">
+                          <span className="block truncate font-semibold">{ingredient.name}</span>
+                          <span className="mt-1 flex flex-wrap gap-2 text-xs text-ink/60">
+                            {ingredient.category ? <span className="rounded bg-paper px-2 py-1 font-semibold">{ingredient.category}</span> : null}
+                            {ingredient.expires_at ? <span>{formatIngredientExpiry(ingredient.expires_at)}</span> : ingredient.quantity ? <span>{ingredient.quantity}</span> : null}
+                          </span>
+                        </span>
+                        <span className={`rounded px-2 py-1 text-xs font-semibold ${selected ? "bg-tomato text-white" : "bg-paper text-ink/60"}`}>
+                          {selected ? "Excluido" : "Disponible"}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="bg-white p-5 text-sm leading-6 text-ink/70">
+                  No hay ingredientes que coincidan con la busqueda o el filtro seleccionado.
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="mt-5 rounded-lg border border-dashed border-line bg-paper p-5">
+            <p className="font-semibold">No hay ingredientes registrados</p>
+            <p className="mt-2 text-sm leading-6 text-ink/70">
+              Anade ingredientes a tu nevera para poder excluirlos de la generacion del menu.
+            </p>
             <button
-              key={ingredient}
-              className="rounded-lg border border-line bg-paper px-3 py-2 text-sm font-semibold text-ink/75 hover:border-tomato hover:text-tomato"
-              onClick={() =>
-                setSettings((current) => ({
-                  ...current,
-                  excludedIngredients: current.excludedIngredients.filter((item) => item !== ingredient),
-                }))
-              }
+              className="mt-4 rounded-lg bg-leaf px-4 py-3 text-sm font-semibold text-white"
+              onClick={onGoToIngredients}
               type="button"
             >
-              {ingredient} x
+              Ir a ingredientes
             </button>
-          ))}
-        </div>
-        <form className="mt-4 grid gap-2 md:grid-cols-[1fr_auto]" onSubmit={addExcludedIngredient}>
-          <input
-            className="min-h-11 rounded-lg border border-line bg-paper px-4 py-2"
-            placeholder="Anadir ingrediente..."
-            value={excludedIngredientDraft}
-            onChange={(event) => setExcludedIngredientDraft(event.target.value)}
-          />
-          <button className="rounded-lg bg-leaf px-5 py-2 font-semibold text-white" type="submit">
-            Anadir
-          </button>
-        </form>
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-line bg-white p-6 shadow-soft">

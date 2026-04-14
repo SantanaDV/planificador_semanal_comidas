@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from .config import settings
-from .demo_fallback import DAYS, MEAL_TYPES, build_replacement_item, build_variant, build_weekly_menu
+from .demo_fallback import DAYS, MEAL_TYPES, build_replacement_item, build_weekly_menu
 from .logging_service import record_exception, record_log
 
 RecipePayload = dict[str, Any]
@@ -58,26 +58,6 @@ def generate_replacement(
     fallback = build_replacement_item(day_index, meal_type, ingredients, preferences, previous_recipe_titles, offset=5)
     fallback["ai_model"] = "fallback-local"
     return fallback
-
-
-def generate_variant(recipe: dict[str, Any], preferences: str) -> RecipePayload:
-    prompt = (
-        "Genera una variante de esta receta en JSON estricto. "
-        "Mantiene dificultad baja, cambia al menos 2 ingredientes o pasos y respeta preferencias.\n"
-        f"Preferencias: {preferences or 'sin preferencias adicionales'}\n"
-        f"Receta base: {json.dumps(recipe, ensure_ascii=False, default=str)}\n"
-        "Formato exacto: {\"recipe\":{\"title\":\"...\",\"description\":\"...\",\"ingredients\":[\"...\"],"
-        "\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25},\"explanation\":\"...\"}"
-    )
-    payload = _call_gemini(prompt)
-    if payload and isinstance(payload.get("recipe"), dict):
-        return {
-            "recipe": _normalize_recipe(payload["recipe"], ["verduras"]),
-            "explanation": str(payload.get("explanation") or "Variante generada desde una receta guardada."),
-        }
-
-    variant = _normalize_recipe(build_variant(recipe), ["verduras"])
-    return {"recipe": variant, "explanation": "Fallback local: variante simple para mantener la demo operativa."}
 
 
 def _call_gemini(prompt: str) -> dict[str, Any] | None:
@@ -131,13 +111,15 @@ def _build_weekly_prompt(
     return (
         "Actua como planificador de menus semanales para una app domestica. "
         "Devuelve solo JSON valido, sin markdown. Genera 14 platos: comida y cena para lunes a domingo. "
-        "Usa ingredientes disponibles cuando tenga sentido, respeta preferencias y evita repetir recetas recientes.\n"
+        "Usa solo ingredientes disponibles de la lista, respeta preferencias y evita repetir recetas recientes. "
+        "No propongas ingredientes que no aparezcan en la lista ni ingredientes excluidos por el usuario.\n"
         f"Ingredientes disponibles: {json.dumps(ingredients, ensure_ascii=False)}\n"
         f"Preferencias: {preferences or 'sin preferencias adicionales'}\n"
         f"Recetas recientes a evitar: {previous_recipe_titles}\n"
         "Formato exacto: {\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\","
         "\"explanation\":\"...\",\"recipe\":{\"title\":\"...\",\"description\":\"...\","
-        "\"ingredients\":[\"...\"],\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25}}]}"
+        "\"ingredients\":[\"...\"],\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25,"
+        "\"difficulty\":\"Facil\",\"servings\":2}}]}"
     )
 
 
@@ -150,13 +132,15 @@ def _build_replacement_prompt(
 ) -> str:
     return (
         "Propone un unico plato de sustitucion para un menu semanal. "
-        "Devuelve solo JSON valido, sin markdown, con una receta sencilla y una explicacion breve.\n"
+        "Devuelve solo JSON valido, sin markdown, con una receta sencilla y una explicacion breve. "
+        "Usa solo ingredientes disponibles de la lista y no propongas ingredientes excluidos por el usuario.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Ingredientes disponibles: {json.dumps(ingredients, ensure_ascii=False)}\n"
         f"Preferencias: {preferences or 'sin preferencias adicionales'}\n"
         f"Recetas recientes a evitar: {previous_recipe_titles}\n"
         "Formato exacto: {\"explanation\":\"...\",\"recipe\":{\"title\":\"...\",\"description\":\"...\","
-        "\"ingredients\":[\"...\"],\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25}}"
+        "\"ingredients\":[\"...\"],\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25,"
+        "\"difficulty\":\"Facil\",\"servings\":2}}"
     )
 
 
@@ -213,4 +197,7 @@ def _normalize_recipe(recipe: dict[str, Any], fallback_ingredients: list[str]) -
         "steps": [str(value) for value in steps][:8],
         "tags": [str(value) for value in tags][:8],
         "prep_time_minutes": int(recipe.get("prep_time_minutes") or 25),
+        "difficulty": str(recipe.get("difficulty") or ""),
+        "servings": int(recipe.get("servings") or 2),
+        "image_url": str(recipe.get("image_url") or "")[:500],
     }

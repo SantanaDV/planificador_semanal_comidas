@@ -49,12 +49,13 @@ class RecipeCreate(BaseModel):
     prep_time_minutes: int = Field(default=25, ge=5, le=240)
     difficulty: str = Field(default="Facil", min_length=1, max_length=40)
     servings: int = Field(default=2, ge=1, le=12)
+    image_url: str | None = Field(default=None, max_length=500)
     source: str = "manual"
+    is_favorite: bool = False
 
 
 class RecipeOut(RecipeCreate):
     id: str
-    is_favorite: bool = True
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -69,6 +70,8 @@ class RecipeUpdate(BaseModel):
     prep_time_minutes: int | None = Field(default=None, ge=5, le=240)
     difficulty: str | None = Field(default=None, min_length=1, max_length=40)
     servings: int | None = Field(default=None, ge=1, le=12)
+    image_url: str | None = Field(default=None, max_length=500)
+    is_favorite: bool | None = None
 
 
 class MenuItemOut(BaseModel):
@@ -93,11 +96,13 @@ class WeeklyMenuOut(BaseModel):
 
 class GenerateMenuRequest(BaseModel):
     preferences: str = ""
+    excluded_ingredient_ids: list[str] = Field(default_factory=list)
     week_start_date: date | None = None
 
 
 class ReplaceItemRequest(BaseModel):
     preferences: str = ""
+    excluded_ingredient_ids: list[str] = Field(default_factory=list)
 
 
 class UseRecipeRequest(BaseModel):

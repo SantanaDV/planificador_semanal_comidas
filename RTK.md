@@ -28,6 +28,11 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [x] Las categorias de ingredientes vienen de base de datos mediante `GET /ingredient-categories`.
 - [x] Ingredientes usa modal de alta con nombre, categoria, cantidad y fecha de caducidad.
 - [x] Ingredientes permite filtrar por busqueda/categoria y ordenar por caducidad o cantidad.
+- [x] Preferencias permite excluir solo ingredientes existentes en la nevera y la generacion valida que queden al menos 5 ingredientes disponibles.
+- [x] La seleccion de ingredientes excluidos usa buscador, filtros por categoria, lista compacta con scroll, chips y limpiar seleccion.
+- [x] El generador recibe recetas guardadas compatibles con la nevera filtrada como contexto, sin incluir las que contienen ingredientes excluidos.
+- [x] El recetario permite abrir cards navegables, crear recetas manuales con foto y marcar favoritas.
+- [x] La generacion prioriza favoritas compatibles sin forzarlas cuando no encajan con nevera o preferencias.
 - [x] `GET /ai/status` expone si se usara Gemini real o fallback local.
 - [x] Generar menu con nevera vacia o con menos de 5 ingredientes abre modal, no redirige automaticamente.
 - [x] Sin clave valida de Gemini, la app avisa antes de continuar con modo demo.
@@ -46,6 +51,7 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [x] Verificar render inicial en navegador headless.
 - [ ] Verificar en navegador que la UI adaptada conserva el flujo demo y no tapa el uso real de la API.
 - [x] Recetario usa cards visuales tipo Figma y filtros plegables por busqueda, etiqueta, dificultad y tiempo.
+- [x] Recetario elimina el flujo de variantes y concentra modificaciones en detalle editable.
 - [x] Dashboard muestra los 7 dias del menu semanal y marca el dia actual cuando la semana coincide.
 - [x] Detalle de receta permite consulta completa y edicion persistente de metadatos, ingredientes, pasos y etiquetas.
 - [x] Si una receta asociada al menu se elimina, dashboard y menu muestran "Plato no disponible" y permiten sustituir el plato.

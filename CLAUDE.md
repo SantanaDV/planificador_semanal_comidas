@@ -39,16 +39,16 @@ Decision IA: se actualiza el modelo por defecto a `gemini-2.5-flash-lite` porque
 
 ## Checklist de entregables y calidad
 
-- [x] App arranca localmente con `docker compose up --build`.
-- [x] Frontend accesible en `http://localhost:3000`.
-- [x] API accesible en `http://localhost:8000/docs`.
-- [x] README contiene pasos claros, variables de entorno y solucion de problemas minima.
-- [x] Prompt log con al menos 3 prompts y explicacion breve.
-- [x] CLAUDE.md registra decisiones, cambios, roadmap y riesgos.
-- [x] RTK.md existe como checklist operativo de revision y entrega.
-- [x] Flujo principal completo: ingredientes -> preferencias -> generar menu -> sustituir plato -> consultar/filtrar/eliminar recetas.
-- [x] La app funciona sin `GEMINI_API_KEY` usando fallback local.
-- [x] El video de 3 minutos tiene guion: problema, solucion, IA usada, demo, mejoras.
+- [X] App arranca localmente con `docker compose up --build`.
+- [X] Frontend accesible en `http://localhost:3000`.
+- [X] API accesible en `http://localhost:8000/docs`.
+- [X] README contiene pasos claros, variables de entorno y solucion de problemas minima.
+- [X] Prompt log con al menos 3 prompts y explicacion breve.
+- [X] CLAUDE.md registra decisiones, cambios, roadmap y riesgos.
+- [X] RTK.md existe como checklist operativo de revision y entrega.
+- [X] Flujo principal completo: ingredientes -> preferencias -> generar menu -> sustituir plato -> consultar/filtrar/eliminar recetas.
+- [X] La app funciona sin `GEMINI_API_KEY` usando fallback local.
+- [X] El video de 3 minutos tiene guion: problema, solucion, IA usada, demo, mejoras.
 
 ## Arquitectura propuesta
 
@@ -171,31 +171,65 @@ Fase 4, pulido:
 - Como se uso la IA: prompts estructurados con ingredientes, preferencias e historial; respuesta JSON persistida.
 - Que mejoraria: autenticacion, nutricion, tests E2E, compra automatica, mejoras visuales y migraciones.
 
-## Prompt log inicial
-
-1. Prompt de planificacion: "Analiza la prueba tecnica y conviertela en entregables, arquitectura, MVP, estructura, base de datos, flujo y plan de 72 horas". Funciono porque transformo un enunciado abierto en una lista accionable.
-2. Prompt de producto: "Construye un MVP de planificador semanal con ingredientes, preferencias, historial y sustituciones, priorizando ejecucion local". Funciono porque recorto alcance y mantuvo el foco en valor demostrable.
-3. Prompt de IA en producto: "Genera un menu semanal en JSON estricto evitando repetir recetas recientes y explicando cada eleccion". Funciono porque hace que la salida sea persistible y facil de validar.
-
-## Politica de prompt log
-
-- El prompt log del README es un entregable vivo, no una lista estatica creada al final.
-- Cada vez que un prompt cambie una decision tecnica, de producto, IA, seguridad, documentacion o entrega, se debe anadir al prompt log con 1-2 lineas explicando por que funciono o que se ajusto.
-- No hace falta registrar prompts triviales de mantenimiento; se registran los que ayuden a defender el proceso.
-- Prompt resenable anadido: "RTK es https://github.com/rtk-ai/rtk; manten el archivo Review and Test Kit y registra que el prompt log se actualiza cuando haya prompts resenables." Funciono porque separo la herramienta RTK externa del checklist local `RTK.md` y fijo una regla operativa para mantener el entregable honesto.
-- Prompt resenable anadido: "A partir de ahora, gestiona Git con commits pequenos, Conventional Commits, revision previa de estado/diff y sin comandos destructivos." Funciono porque convierte el control de versiones en una regla explicita de trabajo y evita mezclar cambios accidentales con entregables revisables.
-- Prompt resenable anadido: "Disena la interfaz de una aplicacion web responsive para planificacion automatica de menus semanales..." Funciono como prompt de Figma AI para explorar una direccion visual SaaS con dashboard, menu semanal, ingredientes, recetas y preferencias. Se usara como referencia de UX, priorizando replicar solo lo que encaje en el MVP.
-- Prompt resenable anadido: "Me gustaria que las preferencias fueran mas como las que te adjunto del proyecto de Figma." Funciono porque concreta una mejora visual y funcional: pasar de textarea libre a configuracion estructurada de dieta, restricciones, excluidos, objetivos y variedad.
-- Prompt resenable anadido: "Generar la parte de recetas con unas cards mas parecidas a Figma y cuidar el tema de filtros." Funciono porque concreta el recetario como superficie visual clave: busqueda, filtros reales y cards con imagen, tiempo, dificultad y acciones.
-- Prompt resenable anadido: "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones." Funciono porque corrige una desviacion visual detectada en uso real: filtros plegables para mantener alineacion y claridad.
-- Prompt resenable anadido: "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas." Funciono porque mejora la demo: el dashboard pasa de preview parcial a lectura semanal completa con indicador temporal.
-- Prompt resenable anadido: "Implementa la vista extendida de detalle de receta siguiendo el diseno actual y dejandola preparada para edicion real." Funciono porque convierte el recetario en una pantalla completa de producto y obliga a cerrar el contrato backend de edicion.
-- Prompt resenable anadido: "Eliminar mocks hardcodeados y sustituirlos por estados vacios, datos demo bajo demanda y fallback documentado." Funciono porque diferencia datos reales, carga demo persistida y fallback local sin depender de mocks de UI.
-- Prompt resenable anadido: "Corregir el flujo de generacion cuando faltan ingredientes o falta la clave de IA." Funciono porque evita redirecciones inesperadas y convierte las validaciones en decisiones explicitas del usuario.
-- Prompt resenable anadido: "Mejorar la gestion de ingredientes con modal, categorias en base de datos, caducidad y filtros." Funciono porque convierte la nevera en una fuente de datos mas realista para IA y elimina el campo unidad libre del flujo principal.
-- Prompt resenable anadido: "Corregir como se muestran las recetas eliminadas en el menu semanal y en el dashboard." Funciono porque mejora un caso de borde real sin cambiar la relacion de datos: `menu_items.recipe_id` puede quedar a null y la UI lo resuelve con un estado accionable.
-
 ## Politica Git y control de versiones
+
+## Memoria de trabajo: Prompt log y trazabilidad
+
+El prompt log público ya está documentado en `README.md`.
+Esta sección de `CLAUDE.md` sirve como regla interna para decidir cuándo registrar nuevos prompts o decisiones relevantes.
+
+### Objetivo
+
+Mantener trazabilidad honesta del uso de IA durante el desarrollo, especialmente en decisiones que afecten a arquitectura, producto, IA, UX, documentación, debugging, seguridad o entrega.
+
+La prueba valora cómo se usa la IA, no solo el resultado final. Por eso, los prompts importantes deben quedar registrados con contexto suficiente para poder defender el proceso.
+
+---
+
+## Criterios para registrar un prompt
+
+Registrar un prompt cuando cumpla al menos una de estas condiciones:
+
+- Cambia una decisión técnica relevante.
+- Define o modifica arquitectura, modelos, endpoints o flujo de datos.
+- Cambia el alcance del MVP.
+- Mejora una funcionalidad visible en la demo.
+- Corrige un problema importante de UX o debugging.
+- Afecta al uso de Gemini, fallback local o generación de menús.
+- Cambia el comportamiento de Docker, README, ejecución local o entrega.
+- Mejora el control de calidad, Git, testing, logging o manejo de errores.
+- Sirve para explicar cómo se usó IA en el proyecto.
+
+No registrar prompts triviales como:
+
+- pequeños cambios de texto
+- renombrados menores
+- ajustes visuales sin impacto
+- correcciones mecánicas sin decisión detrás
+
+---
+
+## Formato obligatorio para nuevos registros
+
+Cuando haya un prompt reseñable, añadirlo al prompt log público usando este formato:
+
+```md
+### Prompt — <categoría o fase>
+
+**Herramienta:** <ChatGPT / Codex / Antigravity / Figma AI / Gemini / otra>
+**Objetivo:** <qué se quería conseguir>
+
+**Prompt usado:**
+> <prompt resumido o completo si es clave>
+
+**Por qué funcionó:**
+<1–2 líneas explicando el valor>
+
+**Qué se ajustó después:**
+<1–2 líneas si hubo iteración o cambio posterior>
+```
+
+## Reglas Git
 
 - No ejecutar comandos destructivos (`git reset --hard`, `git clean -fd`, `git push --force`, reescritura de historial) salvo peticion explicita.
 - Antes de cualquier commit revisar `git status`, `git diff`, archivos sensibles y artefactos generados.
@@ -219,8 +253,6 @@ Fase 4, pulido:
 - Aclaracion 2026-04-13: RTK se refiere tambien a la herramienta externa `rtk-ai/rtk` (`https://github.com/rtk-ai/rtk`), un proxy CLI en Rust que compacta salidas de comandos para reducir consumo de tokens en sesiones con LLM. El archivo local `RTK.md` se mantiene igualmente como "Review and Test Kit" del proyecto.
 - RTK externo esta instalado en esta maquina en `/home/santana/.local/bin/rtk`, version `0.34.2`. `rtk init --show` indica que Codex no esta configurado todavia con RTK global/local. No se ejecuta `rtk init -g --codex` sin confirmacion explicita porque modifica archivos globales en `~/.codex`.
 - Regla de uso desde ahora: cuando haya comandos de lectura, busqueda, git, build o test con salida potencialmente larga, priorizar `rtk ...` o comandos equivalentes RTK (`rtk grep`, `rtk read`, `rtk git diff`, `rtk next build`, `rtk err ...`) para reducir ruido. Para ediciones se sigue usando `apply_patch`.
-- Figma Make link revisado: `https://www.figma.com/make/tdfrWw69PwmWzeJkKQbapG/Interfaz-aplicaci%C3%B3n-planificaci%C3%B3n-men%C3%BAs?t=56tlbYpnUAHoGpVb-1`. Se pudo leer metadata/oEmbed, pero no inspeccionar el canvas completo desde entorno headless; el visor queda cargando y los thumbnails publicos salen casi vacios. Despues se anadio export local en `../Diseño-web-figma` para revisar el codigo generado.
-- Decision de producto/diseno: usar Figma AI como referencia para mejorar la UX, pero no intentar replicar todas las pantallas generadas. Para el MVP conviene adaptar una estructura tipo app SaaS con navegacion, dashboard compacto, menu semanal legible, panel de ingredientes/preferencias y recetario; dejar pantallas completas de detalle/preferencias como mejora si amenaza el plazo.
 
 ## Revision local de Diseño-web-figma
 
@@ -232,9 +264,9 @@ Fase 4, pulido:
 ## Cambios implementados el 2026-04-13
 
 - Backend FastAPI con modelos `User`, `Ingredient`, `Recipe`, `WeeklyMenu` y `MenuItem`.
-- Endpoints: health, ingredientes, recetas, variante, ultimo menu, generar menu, sustituir plato y usar receta guardada.
+- Endpoints: health, ingredientes, recetas, ultimo menu, generar menu, sustituir plato y usar receta guardada.
 - Servicio Gemini por REST usando `x-goog-api-key` y `responseMimeType: application/json`.
-- Fallback local para generar menus, sustituciones y variantes sin clave de Gemini.
+- Fallback local para generar menus y sustituciones sin clave de Gemini.
 - Frontend Next.js 16.2.3 + TypeScript + Tailwind con pantalla unica del flujo principal.
 - Docker Compose con PostgreSQL 16, backend y frontend.
 - README ampliado con pasos de ejecucion, prompt log, guion de video y roadmap.
@@ -299,7 +331,7 @@ Fase 4, pulido:
 
 - La vista Recetas pasa a usar cards visuales con imagen, etiqueta de origen IA/fallback, tiempo, dificultad derivada y etiquetas.
 - Los filtros del recetario se amplian: busqueda por texto/ingrediente/etiqueta, filtro por etiqueta, dificultad y tramo de tiempo.
-- Se mantiene la funcionalidad real del MVP: crear variante y eliminar receta desde cada card.
+- Se mantiene la funcionalidad real del MVP: abrir detalle y eliminar receta desde cada card.
 - Las imagenes se asignan de forma determinista desde un conjunto de imagenes de comida remotas, sin introducir modelo nuevo ni cambios de backend.
 - Las cards de recetas usan animacion hover CSS/Tailwind: elevacion, sombra, borde activo, overlay sutil y zoom suave de imagen.
 - La cabecera de Recetas se ajusta a busqueda visible + boton `Filtros`; las opciones de etiqueta, dificultad y tiempo quedan dentro de un panel desplegable para evitar desalineacion visual.
@@ -358,6 +390,33 @@ Fase 4, pulido:
 - La UI deja de mostrar "Receta eliminada" y renderiza "Plato no disponible" con el texto "Esta receta ya no esta disponible".
 - El dashboard y la vista Menu semanal ofrecen una accion `Sustituir plato` para resolver el hueco sin romper el menu.
 
+## Cambios implementados tras preferencias conectadas a nevera
+
+- La vista Preferencias deja de permitir ingredientes excluidos como texto libre y muestra una lista seleccionable con los ingredientes reales guardados en la nevera.
+- El resumen de preferencias que recibe el backend traduce los IDs excluidos a nombres visibles para que Gemini entienda la restriccion sin desconectarla de la base de datos.
+- El frontend valida que queden al menos 5 ingredientes disponibles despues de aplicar exclusiones antes de mostrar el aviso de Gemini/fallback.
+- El backend filtra `excluded_ingredient_ids` antes de llamar a Gemini o al fallback tanto en generacion semanal como en sustitucion de platos.
+- `weekly_menus.preferences` guarda los IDs excluidos usados para trazabilidad del menu generado.
+- El backend calcula recetas guardadas compatibles con la nevera filtrada y las anade como contexto al generador, evitando recetas que contengan ingredientes excluidos por nombre.
+- El prompt de Gemini se endurece para pedir solo ingredientes disponibles; el fallback local ya no anade aceite/sal/pimienta como ingredientes implicitos.
+
+## Cambios implementados tras mejora UI de ingredientes excluidos
+
+- La seccion "Ingredientes excluidos" deja de usar una cuadricula grande de tarjetas y pasa a un selector compacto con buscador, filtros por categoria y lista con scroll interno.
+- El selector muestra un resumen visible de ingredientes excluidos, chips para quitar elementos concretos y accion para limpiar toda la seleccion.
+- El estado vacio de la seccion ofrece "Ir a ingredientes" para conectar la configuracion de preferencias con la nevera real.
+- Las preferencias se persisten en `localStorage` para mantener exclusiones, dieta, restricciones, objetivos y variedad tras refrescar la pagina.
+
+## Cambios implementados tras mejora de recetario manual y favoritas
+
+- Se elimina el flujo de "Crear variante" del recetario; la modificacion de recetas queda concentrada en el detalle editable.
+- Las cards del recetario pasan a ser navegables completas, manteniendo acciones internas con propagacion controlada para editar, eliminar o marcar favorita.
+- Se anade un modal "Anadir receta" para crear recetas manuales con nombre, foto por URL, descripcion, ingredientes/cantidades, pasos, tiempo, dificultad, raciones, etiquetas y favorito.
+- `Recipe` incorpora `image_url` y mantiene `is_favorite`; la migracion ligera de arranque asegura ambas columnas en bases existentes.
+- El generador recibe favoritas compatibles separadas de recetas guardadas compatibles y las prioriza en el prompt si encajan sin forzarlas.
+- El fallback local tambien lee el contexto de favoritas compatibles y puede priorizarlas en los primeros huecos sin saltarse los ingredientes disponibles.
+- El historial reciente deja de tomar todo el recetario y pasa a usar recetas realmente vinculadas a `menu_items`, para no penalizar una receta manual recien creada que aun no se ha usado en menus.
+
 ## Estandar de logging y errores
 
 - Logging es una preocupacion transversal. Cada nueva funcionalidad o correccion debe registrar eventos relevantes con `level`, `module`, `message`, `context`, `stack_trace` opcional y `created_at`.
@@ -375,14 +434,14 @@ Fase 4, pulido:
 - Se anaden esquemas `SystemLogCreate` y `SystemLogOut`.
 - Se anaden handlers globales de FastAPI para `HTTPException` y excepciones no controladas.
 - Se anaden endpoints `GET /logs` y `POST /logs`.
-- Se instrumentan eventos backend en arranque, ingredientes, variantes, generacion de menu, sustitucion y reutilizacion de recetas.
+- Se instrumentan eventos backend en arranque, ingredientes, generacion de menu, sustitucion y reutilizacion de recetas.
 - Se instrumenta el adaptador Gemini para registrar fallback por falta de API key o fallo de llamada externa.
 - Se anade `reportClientLog` en frontend para errores y eventos de acciones criticas.
 
 ## Verificacion realizada
 
 - `python3 -m compileall backend/app` con dependencias instaladas en `/tmp/menu-backend-deps`: OK.
-- Smoke test con `fastapi.testclient` y SQLite temporal: OK. Valida health, ingredientes, generacion de 14 platos, sustitucion, variante y repetir receta.
+- Smoke test con `fastapi.testclient` y SQLite temporal: OK. Valida health, ingredientes, generacion de 14 platos, sustitucion y repetir receta.
 - `npm install` en frontend: OK.
 - `npm audit --audit-level=high`: OK, 0 vulnerabilidades tras actualizar Next.
 - `npm run build` en frontend: OK.
@@ -513,3 +572,35 @@ Fase 4, pulido:
 - `git diff --check -- backend/app/main.py frontend/app/page.tsx CLAUDE.md README.md RTK.md`: OK.
 - `npm run build` en frontend: OK.
 - Smoke test backend con SQLite temporal y `GEMINI_API_KEY=` usando dependencias en `/tmp/menu-backend-deps`: OK. Valida generar menu, eliminar una receta asociada, obtener `recipe: null` en el hueco y sustituir ese `menu_item` devolviendo de nuevo una receta.
+
+## Verificacion tras preferencias conectadas a nevera
+
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- `git diff --check -- backend/app/main.py backend/app/schemas.py backend/app/ai.py backend/app/demo_fallback.py frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `rg` confirma que no quedan referencias al campo libre antiguo `excludedIngredients`/`excludedIngredientDraft`.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=` usando dependencias en `/tmp/menu-backend-deps`: OK. Valida cargar ingredientes demo, bloquear generacion cuando las exclusiones dejan menos de 5 ingredientes, pasar solo recetas guardadas compatibles, generar 14 platos excluyendo un ingrediente concreto y sustituir un plato respetando la misma exclusion.
+
+## Verificacion tras UI escalable de ingredientes excluidos
+
+- `npm run build` en frontend: OK.
+- `git diff --check -- frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `docker compose up --build -d frontend`: OK. Recompila frontend y recrea backend/frontend por dependencias de Compose; db permanece healthy.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+- `curl -I http://localhost:3000`: HTTP 200.
+- Bundle Docker verificado con el texto `Buscar por nombre`, confirmando que la UI nueva esta en el contenedor levantado.
+
+## Verificacion tras mejora de recetario manual y favoritas
+
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=` usando dependencias en `/tmp/menu-backend-deps`: OK. Valida crear receta manual con foto y favorita, alternar favorito, generar menu con favorita compatible en `favorite_recipe_titles` y priorizarla en fallback local.
+- `git diff --check -- backend/app/models.py backend/app/schemas.py backend/app/main.py backend/app/ai.py backend/app/demo_fallback.py frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `docker compose up --build -d`: OK. Recompila backend/frontend y arranca contra PostgreSQL existente.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
+- `curl http://localhost:8000/health`: `{"status":"ok"}`.
+- `curl -I http://localhost:3000`: HTTP 200.
+- Smoke test Docker/API real: `POST /recipes` con foto/favorita 201, `PATCH /recipes/{id}` alternando favorito 200 y `DELETE /recipes/{id}` 204 para una receta temporal.
+- PostgreSQL contiene columnas `recipes.image_url` y `recipes.is_favorite`.
+- Bundle Docker verificado con el texto `Anadir receta`, confirmando que la UI nueva esta en el contenedor levantado.

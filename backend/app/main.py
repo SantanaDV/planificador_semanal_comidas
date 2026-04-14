@@ -256,10 +256,19 @@ def list_recipes(
 @app.post("/recipes", response_model=RecipeOut, status_code=status.HTTP_201_CREATED)
 def create_recipe(payload: RecipeCreate, session: Session = Depends(get_session)) -> Recipe:
     ensure_demo_user(session)
-    recipe = Recipe(user_id=DEMO_USER_ID, **payload.model_dump())
+    data = _recipe_create_payload(payload)
+    if not data["ingredients"] or not data["steps"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La receta necesita ingredientes y pasos")
+    recipe = Recipe(user_id=DEMO_USER_ID, **data)
     session.add(recipe)
     session.commit()
     session.refresh(recipe)
+    record_log(
+        "info",
+        "database",
+        "Receta creada manualmente",
+        {"recipe_id": recipe.id, "title": recipe.title, "is_favorite": recipe.is_favorite},
+    )
     return recipe
 
 
@@ -278,6 +287,8 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
             value = [item.strip() for item in value if item.strip()]
         elif isinstance(value, str):
             value = value.strip()
+            if field == "image_url" and not value:
+                value = None
         setattr(recipe, field, value)
 
     session.commit()
@@ -311,29 +322,6 @@ def delete_recipe(recipe_id: str, session: Session = Depends(get_session)) -> No
     )
 
 
-@app.post("/recipes/{recipe_id}/variant", response_model=RecipeOut, status_code=status.HTTP_201_CREATED)
-def create_recipe_variant(
-    recipe_id: str,
-    payload: ReplaceItemRequest,
-    session: Session = Depends(get_session),
-) -> Recipe:
-    recipe = session.get(Recipe, recipe_id)
-    if not recipe or recipe.user_id != DEMO_USER_ID:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
-
-    variant = ai.generate_variant(_recipe_to_dict(recipe), payload.preferences)
-    new_recipe = _create_recipe_from_payload(session, variant["recipe"], source="variant")
-    session.commit()
-    session.refresh(new_recipe)
-    record_log(
-        "info",
-        "ai",
-        "Variante de receta creada",
-        {"base_recipe_id": recipe_id, "new_recipe_id": new_recipe.id, "title": new_recipe.title},
-    )
-    return new_recipe
-
-
 @app.get("/menus/latest", response_model=WeeklyMenuOut | None)
 def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | None:
     menu = session.scalar(
@@ -345,40 +333,69 @@ def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | Non
 @app.post("/menus/generate", response_model=WeeklyMenuOut, status_code=status.HTTP_201_CREATED)
 def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
     ensure_demo_user(session)
-    ingredients = _ingredient_payloads(session)
+    all_ingredients = _ingredient_payloads(session)
+    ingredients = _filter_usable_ingredients(all_ingredients, payload.excluded_ingredient_ids)
     if len(ingredients) < MIN_INGREDIENTS_FOR_MENU:
-        detail = (
-            "Anade ingredientes antes de generar el menu o carga ingredientes de prueba."
-            if not ingredients
-            else f"Necesitas al menos {MIN_INGREDIENTS_FOR_MENU} ingredientes para generar un menu semanal util."
-        )
         record_log(
             "warning",
             "menu_planning",
             "Intento de generar menu con ingredientes insuficientes",
-            {"user_id": DEMO_USER_ID, "ingredient_count": len(ingredients), "minimum_required": MIN_INGREDIENTS_FOR_MENU},
+            {
+                "user_id": DEMO_USER_ID,
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "minimum_required": MIN_INGREDIENTS_FOR_MENU,
+            },
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=detail,
+            detail=_insufficient_ingredient_detail(
+                ingredient_count=len(all_ingredients),
+                usable_ingredient_count=len(ingredients),
+                has_exclusions=bool(payload.excluded_ingredient_ids),
+            ),
         )
 
     previous_titles = _recent_recipe_titles(session)
+    compatible_recipe_titles, favorite_recipe_titles = _compatible_saved_recipe_context(
+        all_ingredients,
+        ingredients,
+        payload.excluded_ingredient_ids,
+        session,
+    )
+    generation_preferences = _preferences_with_compatible_recipes(
+        payload.preferences,
+        compatible_recipe_titles,
+        favorite_recipe_titles,
+    )
     try:
-        generated = ai.generate_weekly_menu(ingredients, payload.preferences, previous_titles)
+        generated = ai.generate_weekly_menu(ingredients, generation_preferences, previous_titles)
     except Exception as exc:
         record_exception(
             "menu_planning",
             "Fallo generando menu semanal",
             exc,
-            {"ingredient_count": len(ingredients), "previous_recipe_count": len(previous_titles)},
+            {
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "compatible_recipe_count": len(compatible_recipe_titles),
+                "favorite_recipe_count": len(favorite_recipe_titles),
+                "previous_recipe_count": len(previous_titles),
+            },
         )
         raise HTTPException(status_code=500, detail="No se pudo generar el menu semanal") from exc
 
     menu = WeeklyMenu(
         user_id=DEMO_USER_ID,
         week_start_date=payload.week_start_date or _current_week_start(),
-        preferences={"text": payload.preferences},
+        preferences={
+            "text": payload.preferences,
+            "excluded_ingredient_ids": payload.excluded_ingredient_ids,
+            "compatible_recipe_titles": compatible_recipe_titles,
+            "favorite_recipe_titles": favorite_recipe_titles,
+        },
         generated_from_ingredients=[ingredient["name"] for ingredient in ingredients if ingredient.get("name")],
         ai_model=generated.get("ai_model", settings.gemini_model),
         notes=generated.get("notes", ""),
@@ -410,7 +427,11 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         {
             "menu_id": menu.id,
             "ai_model": menu.ai_model,
-            "ingredient_count": len(ingredients),
+            "ingredient_count": len(all_ingredients),
+            "usable_ingredient_count": len(ingredients),
+            "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+            "compatible_recipe_count": len(compatible_recipe_titles),
+            "favorite_recipe_count": len(favorite_recipe_titles),
             "item_count": len(menu.items),
         },
     )
@@ -426,10 +447,47 @@ def replace_menu_item(
 ) -> dict[str, Any]:
     menu = _get_menu(session, menu_id)
     item = _get_menu_item(session, menu_id, item_id)
+    all_ingredients = _ingredient_payloads(session)
+    ingredients = _filter_usable_ingredients(all_ingredients, payload.excluded_ingredient_ids)
+    if len(ingredients) < MIN_INGREDIENTS_FOR_MENU:
+        record_log(
+            "warning",
+            "menu_planning",
+            "Intento de sustituir plato con ingredientes insuficientes",
+            {
+                "user_id": DEMO_USER_ID,
+                "menu_id": menu_id,
+                "item_id": item_id,
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "minimum_required": MIN_INGREDIENTS_FOR_MENU,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_insufficient_ingredient_detail(
+                ingredient_count=len(all_ingredients),
+                usable_ingredient_count=len(ingredients),
+                has_exclusions=bool(payload.excluded_ingredient_ids),
+            ),
+        )
+
+    compatible_recipe_titles, favorite_recipe_titles = _compatible_saved_recipe_context(
+        all_ingredients,
+        ingredients,
+        payload.excluded_ingredient_ids,
+        session,
+    )
+    generation_preferences = _preferences_with_compatible_recipes(
+        payload.preferences,
+        compatible_recipe_titles,
+        favorite_recipe_titles,
+    )
     try:
         generated = ai.generate_replacement(
-            _ingredient_payloads(session),
-            payload.preferences,
+            ingredients,
+            generation_preferences,
             _recent_recipe_titles(session),
             item.day_index,
             item.meal_type,
@@ -439,7 +497,16 @@ def replace_menu_item(
             "menu_planning",
             "Fallo sustituyendo plato del menu",
             exc,
-            {"menu_id": menu_id, "item_id": item_id, "meal_type": item.meal_type},
+            {
+                "menu_id": menu_id,
+                "item_id": item_id,
+                "meal_type": item.meal_type,
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "compatible_recipe_count": len(compatible_recipe_titles),
+                "favorite_recipe_count": len(favorite_recipe_titles),
+            },
         )
         raise HTTPException(status_code=500, detail="No se pudo sustituir el plato") from exc
     recipe = _create_recipe_from_payload(
@@ -509,6 +576,10 @@ def ensure_recipe_edit_columns() -> None:
         statements.append(("difficulty", "ALTER TABLE recipes ADD COLUMN difficulty VARCHAR(40) NOT NULL DEFAULT 'Facil'"))
     if "servings" not in columns:
         statements.append(("servings", "ALTER TABLE recipes ADD COLUMN servings INTEGER NOT NULL DEFAULT 2"))
+    if "image_url" not in columns:
+        statements.append(("image_url", "ALTER TABLE recipes ADD COLUMN image_url TEXT"))
+    if "is_favorite" not in columns:
+        statements.append(("is_favorite", "ALTER TABLE recipes ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT FALSE"))
 
     if not statements:
         return
@@ -696,11 +767,25 @@ def _create_recipe_from_payload(session: Session, payload: dict[str, Any], sourc
         prep_time_minutes=prep_time_minutes,
         difficulty=payload.get("difficulty") or _difficulty_from_minutes(prep_time_minutes),
         servings=payload.get("servings", 2),
+        image_url=payload.get("image_url") or None,
         source=source,
-        is_favorite=True,
+        is_favorite=bool(payload.get("is_favorite", False)),
     )
     session.add(recipe)
     return recipe
+
+
+def _recipe_create_payload(payload: RecipeCreate) -> dict[str, Any]:
+    data = payload.model_dump()
+    data["title"] = data["title"].strip()
+    data["description"] = data["description"].strip()
+    data["ingredients"] = [item.strip() for item in data["ingredients"] if item.strip()]
+    data["steps"] = [item.strip() for item in data["steps"] if item.strip()]
+    data["tags"] = [item.strip() for item in data["tags"] if item.strip()]
+    data["difficulty"] = data["difficulty"].strip()
+    data["image_url"] = data["image_url"].strip() if data.get("image_url") else None
+    data["source"] = data["source"].strip() or "manual"
+    return data
 
 
 def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
@@ -714,6 +799,7 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "prep_time_minutes": recipe.prep_time_minutes,
         "difficulty": recipe.difficulty or _difficulty_from_minutes(recipe.prep_time_minutes),
         "servings": recipe.servings or 2,
+        "image_url": recipe.image_url,
         "source": recipe.source,
         "is_favorite": recipe.is_favorite,
         "created_at": recipe.created_at,
@@ -732,6 +818,7 @@ def _ingredient_payloads(session: Session) -> list[dict[str, str | None]]:
     ingredients = session.scalars(select(Ingredient).where(Ingredient.user_id == DEMO_USER_ID)).all()
     return [
         {
+            "id": ingredient.id,
             "name": ingredient.name,
             "quantity": ingredient.quantity,
             "category": ingredient.category,
@@ -741,11 +828,120 @@ def _ingredient_payloads(session: Session) -> list[dict[str, str | None]]:
     ]
 
 
-def _recent_recipe_titles(session: Session, limit: int = 24) -> list[str]:
+def _filter_usable_ingredients(
+    ingredients: list[dict[str, str | None]],
+    excluded_ingredient_ids: list[str],
+) -> list[dict[str, str | None]]:
+    excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
+    if not excluded_ids:
+        return ingredients
+    return [ingredient for ingredient in ingredients if ingredient.get("id") not in excluded_ids]
+
+
+def _compatible_saved_recipe_context(
+    all_ingredients: list[dict[str, str | None]],
+    usable_ingredients: list[dict[str, str | None]],
+    excluded_ingredient_ids: list[str],
+    session: Session,
+    limit: int = 8,
+) -> tuple[list[str], list[str]]:
+    usable_names = {
+        normalize_label(str(ingredient.get("name") or ""))
+        for ingredient in usable_ingredients
+        if ingredient.get("name")
+    }
+    excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
+    excluded_names = {
+        normalize_label(str(ingredient.get("name") or ""))
+        for ingredient in all_ingredients
+        if ingredient.get("id") in excluded_ids and ingredient.get("name")
+    }
+    if not usable_names:
+        return [], []
+
     recipes = session.scalars(
-        select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc()).limit(limit)
+        select(Recipe)
+        .where(Recipe.user_id == DEMO_USER_ID)
+        .order_by(Recipe.is_favorite.desc(), Recipe.created_at.desc())
+        .limit(50)
     ).all()
-    return [recipe.title for recipe in recipes]
+    titles: list[str] = []
+    favorite_titles: list[str] = []
+    for recipe in recipes:
+        recipe_ingredient_names = [
+            _normalize_recipe_ingredient_name(str(value))
+            for value in (recipe.ingredients or [])
+            if str(value).strip()
+        ]
+        if excluded_names and any(_ingredient_name_matches(recipe_name, excluded_name) for recipe_name in recipe_ingredient_names for excluded_name in excluded_names):
+            continue
+        if not any(_ingredient_name_matches(recipe_name, usable_name) for recipe_name in recipe_ingredient_names for usable_name in usable_names):
+            continue
+        if recipe.is_favorite and len(favorite_titles) < limit:
+            favorite_titles.append(recipe.title)
+        titles.append(recipe.title)
+        if len(titles) >= limit:
+            break
+    return titles, favorite_titles
+
+
+def _normalize_recipe_ingredient_name(value: str) -> str:
+    name = value.split(" - ", 1)[0].split(":", 1)[0]
+    return normalize_label(name)
+
+
+def _ingredient_name_matches(recipe_name: str, fridge_name: str) -> bool:
+    if len(recipe_name) < 3 or len(fridge_name) < 3:
+        return False
+    return recipe_name in fridge_name or fridge_name in recipe_name
+
+
+def _preferences_with_compatible_recipes(
+    preferences: str,
+    compatible_recipe_titles: list[str],
+    favorite_recipe_titles: list[str],
+) -> str:
+    parts = [preferences.strip()]
+    if favorite_recipe_titles:
+        parts.append(
+            "Recetas favoritas compatibles que debes priorizar si encajan sin forzarlas: "
+            + ", ".join(favorite_recipe_titles)
+            + "."
+        )
+    if compatible_recipe_titles:
+        parts.append(
+            "Recetas guardadas compatibles que puedes reutilizar si encajan: "
+            + ", ".join(compatible_recipe_titles)
+            + "."
+        )
+    return " ".join(part for part in parts if part)
+
+
+def _insufficient_ingredient_detail(
+    ingredient_count: int,
+    usable_ingredient_count: int,
+    has_exclusions: bool,
+) -> str:
+    if ingredient_count == 0:
+        return "Anade ingredientes antes de generar el menu o carga ingredientes de prueba."
+    if has_exclusions:
+        return (
+            f"Tras aplicar tus exclusiones quedan {usable_ingredient_count} ingredientes disponibles. "
+            f"Necesitas al menos {MIN_INGREDIENTS_FOR_MENU} ingredientes para generar un menu semanal util."
+        )
+    return f"Necesitas al menos {MIN_INGREDIENTS_FOR_MENU} ingredientes para generar un menu semanal util."
+
+
+def _recent_recipe_titles(session: Session, limit: int = 24) -> list[str]:
+    return list(
+        session.scalars(
+            select(Recipe.title)
+            .join(MenuItem, MenuItem.recipe_id == Recipe.id)
+            .where(Recipe.user_id == DEMO_USER_ID)
+            .order_by(MenuItem.created_at.desc())
+            .limit(limit)
+        )
+    )
 
 
 def _get_menu(session: Session, menu_id: str) -> WeeklyMenu:
