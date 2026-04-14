@@ -40,6 +40,7 @@ Nota: este archivo local se mantiene por decision del proyecto como "Review and 
 - [ ] Verificar en navegador que la UI adaptada conserva el flujo demo y no tapa el uso real de la API.
 - [x] Recetario usa cards visuales tipo Figma y filtros plegables por busqueda, etiqueta, dificultad y tiempo.
 - [x] Dashboard muestra los 7 dias del menu semanal y marca el dia actual cuando la semana coincide.
+- [x] Detalle de receta permite consulta completa y edicion persistente de metadatos, ingredientes, pasos y etiquetas.
 
 ## Decision Docker/Next
 

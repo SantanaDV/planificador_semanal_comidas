@@ -24,7 +24,9 @@ class RecipeCreate(BaseModel):
     ingredients: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
-    prep_time_minutes: int = 25
+    prep_time_minutes: int = Field(default=25, ge=5, le=240)
+    difficulty: str = Field(default="Facil", min_length=1, max_length=40)
+    servings: int = Field(default=2, ge=1, le=12)
     source: str = "manual"
 
 
@@ -34,6 +36,17 @@ class RecipeOut(RecipeCreate):
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class RecipeUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = None
+    ingredients: list[str] | None = None
+    steps: list[str] | None = None
+    tags: list[str] | None = None
+    prep_time_minutes: int | None = Field(default=None, ge=5, le=240)
+    difficulty: str | None = Field(default=None, min_length=1, max_length=40)
+    servings: int | None = Field(default=None, ge=1, le=12)
 
 
 class MenuItemOut(BaseModel):

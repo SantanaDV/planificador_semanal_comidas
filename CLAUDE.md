@@ -73,6 +73,7 @@ En alcance:
 - Repeticion de receta guardada en un hueco del menu.
 - Listado de recetas guardadas con filtro por texto o etiqueta.
 - Eliminacion de recetas guardadas.
+- Detalle editable de recetas guardadas con ingredientes/cantidades, pasos, etiquetas, tiempo, dificultad y raciones.
 - Explicacion breve de por que se eligio cada plato.
 - Fallback sin Gemini para ejecucion local estable.
 
@@ -187,6 +188,7 @@ Fase 4, pulido:
 - Prompt resenable anadido: "Generar la parte de recetas con unas cards mas parecidas a Figma y cuidar el tema de filtros." Funciono porque concreta el recetario como superficie visual clave: busqueda, filtros reales y cards con imagen, tiempo, dificultad y acciones.
 - Prompt resenable anadido: "La barra de busqueda con un icono filtros que al darle salgan las distintas opciones." Funciono porque corrige una desviacion visual detectada en uso real: filtros plegables para mantener alineacion y claridad.
 - Prompt resenable anadido: "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas." Funciono porque mejora la demo: el dashboard pasa de preview parcial a lectura semanal completa con indicador temporal.
+- Prompt resenable anadido: "Implementa la vista extendida de detalle de receta siguiendo el diseno actual y dejandola preparada para edicion real." Funciono porque convierte el recetario en una pantalla completa de producto y obliga a cerrar el contrato backend de edicion.
 
 ## Politica Git y control de versiones
 
@@ -303,6 +305,14 @@ Fase 4, pulido:
 - Se calcula el dia actual comparando `week_start_date` con la fecha local y se marca la tarjeta correspondiente con un estado visual `Hoy`.
 - Si el menu guardado no pertenece a la semana actual, el dashboard sigue mostrando toda la semana sin forzar un indicador incorrecto.
 
+## Cambios implementados tras detalle editable de receta
+
+- Se anade una vista interna `recipeDetail` dentro del shell actual, manteniendo sidebar y sin introducir rutas ni dependencias nuevas.
+- La pantalla muestra cabecera con nombre, descripcion, tiempo, dificultad, raciones, estado guardada, imagen, etiquetas, ingredientes con cantidades, pasos numerados y consejo IA.
+- El frontend permite editar nombre, descripcion, ingredientes/cantidades, pasos, etiquetas, tiempo, dificultad y raciones desde la misma pantalla.
+- El backend anade `PATCH /recipes/{recipe_id}` y campos persistentes `difficulty` y `servings` en `Recipe`.
+- Para bases existentes se anade una migracion ligera de arranque que asegura las columnas `difficulty` y `servings` sin introducir Alembic en el MVP.
+
 ## Estandar de logging y errores
 
 - Logging es una preocupacion transversal. Cada nueva funcionalidad o correccion debe registrar eventos relevantes con `level`, `module`, `message`, `context`, `stack_trace` opcional y `created_at`.
@@ -405,3 +415,14 @@ Fase 4, pulido:
 - `curl http://localhost:8000/health`: `{"status":"ok"}`.
 - `docker compose ps`: db, backend y frontend `Up`; db `healthy`.
 - Chrome headless en Windows captura `http://localhost:3000` en `/tmp/menu-planner-dashboard-loaded.png`: se ven los 7 dias y `Lunes` marcado como `Hoy` para la semana `2026-04-13`.
+
+## Verificacion tras detalle editable de receta
+
+- `git diff --check -- backend/app/main.py backend/app/models.py backend/app/schemas.py frontend/app/page.tsx README.md CLAUDE.md RTK.md`: OK.
+- `python3 -m compileall backend/app`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y dependencias en `/tmp/menu-backend-deps`: OK. Valida `POST /recipes`, `PATCH /recipes/{id}` actualizando titulo, dificultad, raciones, ingredientes y pasos.
+- `docker compose up --build -d`: OK. Recompila backend/frontend y arranca contra PostgreSQL existente.
+- Smoke test Docker/API real: `GET /health` 200, `POST /recipes` 201, `PATCH /recipes/{id}` 200 y `DELETE /recipes/{id}` 204 para una receta temporal.
+- `curl -I http://localhost:3000`: HTTP 200.
+- `docker compose ps`: db, backend y frontend `Up`; db `healthy`.

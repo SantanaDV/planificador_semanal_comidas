@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from . import ai
@@ -21,6 +21,7 @@ from .schemas import (
     IngredientOut,
     RecipeCreate,
     RecipeOut,
+    RecipeUpdate,
     ReplaceItemRequest,
     SystemLogCreate,
     SystemLogOut,
@@ -46,6 +47,7 @@ DEMO_INGREDIENTS = [
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_recipe_edit_columns()
     with Session(engine) as session:
         ensure_demo_user(session)
         ensure_demo_ingredients(session)
@@ -182,6 +184,34 @@ def create_recipe(payload: RecipeCreate, session: Session = Depends(get_session)
     session.add(recipe)
     session.commit()
     session.refresh(recipe)
+    return recipe
+
+
+@app.patch("/recipes/{recipe_id}", response_model=RecipeOut)
+def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depends(get_session)) -> Recipe:
+    recipe = session.get(Recipe, recipe_id)
+    if not recipe or recipe.user_id != DEMO_USER_ID:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        return recipe
+
+    for field, value in changes.items():
+        if isinstance(value, list):
+            value = [item.strip() for item in value if item.strip()]
+        elif isinstance(value, str):
+            value = value.strip()
+        setattr(recipe, field, value)
+
+    session.commit()
+    session.refresh(recipe)
+    record_log(
+        "info",
+        "database",
+        "Receta actualizada",
+        {"recipe_id": recipe.id, "updated_fields": sorted(changes.keys())},
+    )
     return recipe
 
 
@@ -375,6 +405,33 @@ def ensure_demo_ingredients(session: Session) -> None:
     record_log("info", "database", "Ingredientes demo precargados", {"ingredient_count": len(DEMO_INGREDIENTS)})
 
 
+def ensure_recipe_edit_columns() -> None:
+    inspector = inspect(engine)
+    if "recipes" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("recipes")}
+    statements: list[tuple[str, str]] = []
+    if "difficulty" not in columns:
+        statements.append(("difficulty", "ALTER TABLE recipes ADD COLUMN difficulty VARCHAR(40) NOT NULL DEFAULT 'Facil'"))
+    if "servings" not in columns:
+        statements.append(("servings", "ALTER TABLE recipes ADD COLUMN servings INTEGER NOT NULL DEFAULT 2"))
+
+    if not statements:
+        return
+
+    with engine.begin() as connection:
+        for _, statement in statements:
+            connection.execute(text(statement))
+
+    record_log(
+        "info",
+        "database",
+        "Columnas de edicion de recetas aseguradas",
+        {"columns": [column for column, _ in statements]},
+    )
+
+
 def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
     meal_order = {"comida": 0, "cena": 1}
     return {
@@ -403,6 +460,7 @@ def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
 
 
 def _create_recipe_from_payload(session: Session, payload: dict[str, Any], source: str) -> Recipe:
+    prep_time_minutes = payload.get("prep_time_minutes", 25)
     recipe = Recipe(
         user_id=DEMO_USER_ID,
         title=payload["title"],
@@ -410,7 +468,9 @@ def _create_recipe_from_payload(session: Session, payload: dict[str, Any], sourc
         ingredients=payload.get("ingredients", []),
         steps=payload.get("steps", []),
         tags=payload.get("tags", []),
-        prep_time_minutes=payload.get("prep_time_minutes", 25),
+        prep_time_minutes=prep_time_minutes,
+        difficulty=payload.get("difficulty") or _difficulty_from_minutes(prep_time_minutes),
+        servings=payload.get("servings", 2),
         source=source,
         is_favorite=True,
     )
@@ -427,10 +487,20 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "steps": recipe.steps or [],
         "tags": recipe.tags or [],
         "prep_time_minutes": recipe.prep_time_minutes,
+        "difficulty": recipe.difficulty or _difficulty_from_minutes(recipe.prep_time_minutes),
+        "servings": recipe.servings or 2,
         "source": recipe.source,
         "is_favorite": recipe.is_favorite,
         "created_at": recipe.created_at,
     }
+
+
+def _difficulty_from_minutes(minutes: int) -> str:
+    if minutes <= 30:
+        return "Facil"
+    if minutes <= 45:
+        return "Media"
+    return "Elaborada"
 
 
 def _ingredient_payloads(session: Session) -> list[dict[str, str | None]]:

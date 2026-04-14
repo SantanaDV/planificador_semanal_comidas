@@ -17,6 +17,7 @@ Aplicacion web para crear menus semanales a partir de ingredientes disponibles, 
 - Sustitucion de platos del menu.
 - Repeticion de recetas guardadas en un hueco del menu.
 - Recetario con filtro, eliminacion y variantes.
+- Detalle editable de receta con ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
 - Explicacion breve de por que se eligio cada plato.
 - Ingredientes demo precargados para poder generar un primer menu sin preparar datos manualmente.
 - Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
@@ -137,7 +138,8 @@ En DBeaver, la tabla aparece en `menu_planner -> Schemas -> public -> Tables -> 
 4. Pulsa "Generar menu semanal".
 5. Sustituye un plato para mostrar IA/fallback.
 6. Repite una receta guardada desde el selector.
-7. Filtra el recetario y crea una variante.
+7. Filtra el recetario, abre el detalle de una receta y edita raciones, dificultad, ingredientes o pasos.
+8. Crea una variante desde el recetario.
 
 ## Prompt log
 
@@ -183,11 +185,14 @@ En DBeaver, la tabla aparece en `menu_planner -> Schemas -> public -> Tables -> 
 14. "En el dashboard deberian salir todos los dias y deberia indicar en que dia estas."
     Funciono porque convierte el dashboard en una lectura semanal completa y mejora la orientacion temporal de la demo marcando el dia actual.
 
+15. "Implementa la vista extendida de detalle de receta siguiendo el diseno actual y dejandola preparada para edicion real."
+    Funciono porque convierte el recetario en una superficie de producto completa: consulta, edicion persistente, metadatos y preparacion sin rehacer arquitectura.
+
 ## Guion sugerido para video de 3 minutos
 
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
 - 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker, Gemini con fallback.
-- 0:55-2:10: demo: ingredientes, preferencias, generar menu, sustituir plato, repetir receta y recetario.
+- 0:55-2:10: demo: ingredientes, preferencias, generar menu, sustituir plato, repetir receta y recetario con detalle editable.
 - 2:10-2:35: uso de IA: Antigravity/Codex para desarrollo, Figma AI para explorar interfaz y Gemini para generar menus con ingredientes, preferencias e historial.
 - 2:35-3:00: mejoras: login real, nutricion, tests E2E, migraciones y lista de compra.
 

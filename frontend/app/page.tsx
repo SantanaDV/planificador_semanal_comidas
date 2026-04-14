@@ -18,6 +18,8 @@ type Recipe = {
   steps: string[];
   tags: string[];
   prep_time_minutes: number;
+  difficulty?: string | null;
+  servings?: number | null;
   source: string;
 };
 
@@ -39,7 +41,7 @@ type WeeklyMenu = {
   items: MenuItem[];
 };
 
-type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "preferences";
+type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "recipeDetail" | "preferences";
 type LogLevel = "info" | "warning" | "error";
 
 type PreferenceSettings = {
@@ -48,6 +50,33 @@ type PreferenceSettings = {
   excludedIngredients: string[];
   goals: string[];
   varietyLevel: string;
+};
+
+type RecipeIngredientDraft = {
+  name: string;
+  quantity: string;
+};
+
+type RecipeEditForm = {
+  title: string;
+  description: string;
+  prepTimeMinutes: string;
+  difficulty: string;
+  servings: string;
+  ingredients: RecipeIngredientDraft[];
+  steps: string[];
+  tagsText: string;
+};
+
+type RecipeUpdatePayload = {
+  title: string;
+  description: string;
+  ingredients: string[];
+  steps: string[];
+  tags: string[];
+  prep_time_minutes: number;
+  difficulty: string;
+  servings: number;
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -168,7 +197,8 @@ function buildPreferencesSummary(settings: PreferenceSettings) {
     .join(" ");
 }
 
-function getRecipeDifficulty(minutes: number) {
+function getRecipeDifficulty(minutes: number, difficulty?: string | null) {
+  if (difficulty?.trim()) return difficulty;
   if (minutes <= 30) return "Facil";
   if (minutes <= 45) return "Media";
   return "Elaborada";
@@ -184,6 +214,52 @@ function matchesRecipeTime(recipe: Recipe, timeFilter: string) {
 function getRecipeImage(recipe: Recipe, index: number) {
   const hash = Array.from(`${recipe.id}${recipe.title}`).reduce((total, letter) => total + letter.charCodeAt(0), index);
   return recipeImages[hash % recipeImages.length];
+}
+
+function getRecipeServings(recipe: Recipe) {
+  return recipe.servings && recipe.servings > 0 ? recipe.servings : 2;
+}
+
+function parseIngredientLine(value: string): RecipeIngredientDraft {
+  const trimmed = value.trim();
+  if (!trimmed) return { name: "", quantity: "" };
+
+  const dashMatch = trimmed.match(/^(.+?)\s+-\s+(.+)$/);
+  if (dashMatch) return { name: dashMatch[1].trim(), quantity: dashMatch[2].trim() };
+
+  const colonMatch = trimmed.match(/^(.+?):\s*(.+)$/);
+  if (colonMatch) return { name: colonMatch[1].trim(), quantity: colonMatch[2].trim() };
+
+  const leadingQuantity = trimmed.match(
+    /^([\d.,/]+\s*(?:g|kg|ml|l|ud|uds|unidad|unidades|cucharadas?|cucharaditas?|tazas?|botes?|bolsas?|filetes?|rebanadas?)?)\s+(.+)$/i,
+  );
+  if (leadingQuantity) return { name: leadingQuantity[2].trim(), quantity: leadingQuantity[1].trim() };
+
+  return { name: trimmed, quantity: "" };
+}
+
+function formatIngredientDraft(ingredient: RecipeIngredientDraft) {
+  const name = ingredient.name.trim();
+  const quantity = ingredient.quantity.trim();
+  return quantity ? `${name} - ${quantity}` : name;
+}
+
+function buildRecipeEditForm(recipe: Recipe): RecipeEditForm {
+  return {
+    title: recipe.title,
+    description: recipe.description,
+    prepTimeMinutes: String(recipe.prep_time_minutes || 25),
+    difficulty: getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty),
+    servings: String(getRecipeServings(recipe)),
+    ingredients: recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [{ name: "", quantity: "" }],
+    steps: recipe.steps.length ? recipe.steps : [""],
+    tagsText: recipe.tags.join(", "),
+  };
+}
+
+function getRecipeTip(recipe: Recipe) {
+  const mainIngredient = parseIngredientLine(recipe.ingredients[0] ?? "").name || "los ingredientes principales";
+  return `Recomendacion IA: prepara ${mainIngredient.toLowerCase()} justo antes de servir y ajusta sal, acidez y textura al final para que la receta mantenga contraste.`;
 }
 
 function toLocalDateKey(date: Date) {
@@ -213,6 +289,7 @@ export default function Home() {
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [menu, setMenu] = useState<WeeklyMenu | null>(null);
+  const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
   const [preferenceSettings, setPreferenceSettings] = useState<PreferenceSettings>(defaultPreferenceSettings);
   const [excludedIngredientDraft, setExcludedIngredientDraft] = useState("");
   const [recipeFilter, setRecipeFilter] = useState("");
@@ -281,18 +358,23 @@ export default function Home() {
         recipe.tags.some((tag) => tag.toLowerCase().includes(query));
       const matchesTag = recipeTagFilter === "Todas" || recipe.tags.includes(recipeTagFilter);
       const matchesDifficulty =
-        recipeDifficultyFilter === "Todas" || getRecipeDifficulty(recipe.prep_time_minutes) === recipeDifficultyFilter;
+        recipeDifficultyFilter === "Todas" ||
+        getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty) === recipeDifficultyFilter;
       return matchesQuery && matchesTag && matchesDifficulty && matchesRecipeTime(recipe, recipeTimeFilter);
     });
   }, [recipeDifficultyFilter, recipeFilter, recipeTagFilter, recipeTimeFilter, recipes]);
 
+  const selectedRecipe = useMemo(
+    () => recipes.find((recipe) => recipe.id === selectedRecipeId) ?? null,
+    [recipes, selectedRecipeId],
+  );
   const plannedSlots = menu?.items.filter((item) => item.recipe).length ?? 0;
   const dashboardDays = groupedMenu;
   const currentMenuDayIndex = getCurrentMenuDayIndex(menu);
   const latestRecipes = recipes.slice(0, 4);
   const expiringIngredients = ingredients.slice(0, 4);
   const recipeTags = ["Todas", ...Array.from(new Set(recipes.flatMap((recipe) => recipe.tags))).slice(0, 10)];
-  const navItems: { id: ViewId; label: string; description: string }[] = [
+  const navItems: { id: Exclude<ViewId, "recipeDetail">; label: string; description: string }[] = [
     { id: "dashboard", label: "Dashboard", description: "Resumen" },
     { id: "menu", label: "Menu semanal", description: "Plan de 7 dias" },
     { id: "ingredients", label: "Ingredientes", description: "Nevera" },
@@ -304,7 +386,13 @@ export default function Home() {
     { label: "Ingredientes disponibles", value: ingredients.length.toString(), detail: "Base actual de la nevera" },
     { label: "Huecos planificados", value: `${plannedSlots}/14`, detail: menu ? `Semana ${menu.week_start_date}` : "Pendiente de generar" },
   ];
-  const activeMeta = navItems.find((item) => item.id === activeView) ?? navItems[0];
+  const activeMeta =
+    activeView === "recipeDetail"
+      ? {
+          label: selectedRecipe?.title ?? "Detalle de receta",
+          description: "Consulta completa y edicion preparada para recetario.",
+        }
+      : (navItems.find((item) => item.id === activeView) ?? navItems[0]);
 
   function savePreferences() {
     setMessage("Preferencias guardadas para la proxima generacion.");
@@ -316,6 +404,56 @@ export default function Home() {
       goals_count: preferenceSettings.goals.length,
       variety_level: preferenceSettings.varietyLevel,
     });
+  }
+
+  function openRecipeDetail(recipe: Recipe) {
+    setSelectedRecipeId(recipe.id);
+    setActiveView("recipeDetail");
+    reportClientLog("info", "Detalle de receta abierto desde frontend", {
+      action: "open_recipe_detail",
+      recipe_id: recipe.id,
+    });
+  }
+
+  function useRecipeFromDetail(recipe: Recipe) {
+    setActiveView("menu");
+    setMessage(`Selecciona un hueco del menu semanal para reutilizar "${recipe.title}".`);
+    reportClientLog("info", "Receta preparada para reutilizar desde detalle", {
+      action: "prepare_use_recipe",
+      recipe_id: recipe.id,
+    });
+  }
+
+  async function updateRecipe(recipeId: string, payload: RecipeUpdatePayload) {
+    setLoading(true);
+    try {
+      const data = await api<Recipe>(`/recipes/${recipeId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      setRecipes((current) => current.map((recipe) => (recipe.id === data.id ? data : recipe)));
+      setMenu((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) => (item.recipe?.id === data.id ? { ...item, recipe: data } : item)),
+            }
+          : current,
+      );
+      setSelectedRecipeId(data.id);
+      setMessage("Receta actualizada.");
+      reportClientLog("info", "Receta actualizada desde frontend", {
+        action: "update_recipe",
+        recipe_id: data.id,
+      });
+      return data;
+    } catch (error) {
+      setMessage(getErrorMessage(error, "Error al actualizar receta."));
+      reportClientLog("error", "Error actualizando receta desde frontend", { action: "update_recipe", recipe_id: recipeId }, error);
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function addIngredient(event: FormEvent<HTMLFormElement>) {
@@ -478,23 +616,26 @@ export default function Home() {
             </div>
 
             <nav className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible" aria-label="Navegacion principal">
-              {navItems.map((item) => (
-                <button
-                  key={item.id}
-                  className={`min-w-fit rounded-lg border px-3 py-2 text-left transition lg:px-4 lg:py-3 ${
-                    activeView === item.id
-                      ? "border-leaf bg-leaf text-white shadow-soft"
-                      : "border-line text-ink/80 hover:border-leaf hover:text-leaf"
-                  }`}
-                  onClick={() => setActiveView(item.id)}
-                  type="button"
-                >
-                  <span className="block text-sm font-semibold">{item.label}</span>
-                  <span className={`hidden text-xs lg:block ${activeView === item.id ? "text-white/75" : "text-ink/55"}`}>
-                    {item.description}
-                  </span>
-                </button>
-              ))}
+              {navItems.map((item) => {
+                const isActive = activeView === item.id || (activeView === "recipeDetail" && item.id === "recipes");
+                return (
+                  <button
+                    key={item.id}
+                    className={`min-w-fit rounded-lg border px-3 py-2 text-left transition lg:px-4 lg:py-3 ${
+                      isActive
+                        ? "border-leaf bg-leaf text-white shadow-soft"
+                        : "border-line text-ink/80 hover:border-leaf hover:text-leaf"
+                    }`}
+                    onClick={() => setActiveView(item.id)}
+                    type="button"
+                  >
+                    <span className="block text-sm font-semibold">{item.label}</span>
+                    <span className={`hidden text-xs lg:block ${isActive ? "text-white/75" : "text-ink/55"}`}>
+                      {item.description}
+                    </span>
+                  </button>
+                );
+              })}
             </nav>
 
             <div className="mt-auto grid gap-3 rounded-lg border border-line bg-paper p-4 text-sm">
@@ -577,6 +718,7 @@ export default function Home() {
                 loading={loading}
                 onCreateVariant={createVariant}
                 onDeleteRecipe={deleteRecipe}
+                onOpenRecipe={openRecipeDetail}
                 recipeFilter={recipeFilter}
                 recipeTags={recipeTags}
                 setDifficultyFilter={setRecipeDifficultyFilter}
@@ -586,6 +728,17 @@ export default function Home() {
                 tagFilter={recipeTagFilter}
                 timeFilter={recipeTimeFilter}
                 totalRecipes={recipes.length}
+              />
+            ) : null}
+
+            {activeView === "recipeDetail" ? (
+              <RecipeDetailView
+                loading={loading}
+                onBack={() => setActiveView("recipes")}
+                onUpdateRecipe={updateRecipe}
+                onUseInMenu={useRecipeFromDetail}
+                recipe={selectedRecipe}
+                recipeIndex={selectedRecipe ? recipes.findIndex((recipe) => recipe.id === selectedRecipe.id) : 0}
               />
             ) : null}
 
@@ -1002,6 +1155,7 @@ function RecipesView({
   loading,
   onCreateVariant,
   onDeleteRecipe,
+  onOpenRecipe,
   recipeFilter,
   recipeTags,
   setDifficultyFilter,
@@ -1017,6 +1171,7 @@ function RecipesView({
   loading: boolean;
   onCreateVariant: (recipeId: string) => void;
   onDeleteRecipe: (recipeId: string) => void;
+  onOpenRecipe: (recipe: Recipe) => void;
   recipeFilter: string;
   recipeTags: string[];
   setDifficultyFilter: (filter: string) => void;
@@ -1170,7 +1325,7 @@ function RecipesView({
       ) : (
         <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-3">
           {filteredRecipes.map((recipe, index) => {
-            const difficulty = getRecipeDifficulty(recipe.prep_time_minutes);
+            const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
             return (
               <article
                 key={recipe.id}
@@ -1222,7 +1377,15 @@ function RecipesView({
                     ) : null}
                   </div>
 
-                  <div className="mt-5 grid gap-2 sm:grid-cols-2">
+                  <div className="mt-5 grid gap-2 sm:grid-cols-3">
+                    <button
+                      className="rounded-lg bg-leaf px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                      disabled={loading}
+                      onClick={() => onOpenRecipe(recipe)}
+                      type="button"
+                    >
+                      Ver detalle
+                    </button>
                     <button
                       className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf disabled:opacity-60"
                       disabled={loading}
@@ -1247,6 +1410,419 @@ function RecipesView({
         </div>
       )}
     </section>
+  );
+}
+
+function RecipeDetailView({
+  loading,
+  onBack,
+  onUpdateRecipe,
+  onUseInMenu,
+  recipe,
+  recipeIndex,
+}: {
+  loading: boolean;
+  onBack: () => void;
+  onUpdateRecipe: (recipeId: string, payload: RecipeUpdatePayload) => Promise<Recipe | null>;
+  onUseInMenu: (recipe: Recipe) => void;
+  recipe: Recipe | null;
+  recipeIndex: number;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const [draft, setDraft] = useState<RecipeEditForm | null>(() => (recipe ? buildRecipeEditForm(recipe) : null));
+
+  useEffect(() => {
+    setIsEditing(false);
+    setLocalError("");
+    setDraft(recipe ? buildRecipeEditForm(recipe) : null);
+  }, [recipe]);
+
+  if (!recipe || !draft) {
+    return (
+      <section className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
+        <button className="mb-4 text-sm font-semibold text-leaf hover:text-ink" onClick={onBack} type="button">
+          Volver a recetas
+        </button>
+        No se ha seleccionado ninguna receta.
+      </section>
+    );
+  }
+
+  const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
+  const servings = getRecipeServings(recipe);
+  const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
+
+  function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            ingredients: current.ingredients.map((ingredient, itemIndex) =>
+              itemIndex === index ? { ...ingredient, [field]: value } : ingredient,
+            ),
+          }
+        : current,
+    );
+  }
+
+  function removeIngredient(index: number) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            ingredients: current.ingredients.filter((_, itemIndex) => itemIndex !== index),
+          }
+        : current,
+    );
+  }
+
+  function updateStep(index: number, value: string) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            steps: current.steps.map((step, itemIndex) => (itemIndex === index ? value : step)),
+          }
+        : current,
+    );
+  }
+
+  function removeStep(index: number) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            steps: current.steps.filter((_, itemIndex) => itemIndex !== index),
+          }
+        : current,
+    );
+  }
+
+  async function saveRecipe(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!recipe) return;
+    if (!draft) return;
+    const prepTimeMinutes = Number(draft.prepTimeMinutes);
+    const nextServings = Number(draft.servings);
+    const ingredients = draft.ingredients.map(formatIngredientDraft).filter(Boolean);
+    const steps = draft.steps.map((step) => step.trim()).filter(Boolean);
+    const tags = draft.tagsText
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
+    if (!draft.title.trim()) {
+      setLocalError("El nombre de la receta es obligatorio.");
+      return;
+    }
+    if (!Number.isFinite(prepTimeMinutes) || prepTimeMinutes < 5) {
+      setLocalError("El tiempo debe ser de al menos 5 minutos.");
+      return;
+    }
+    if (!Number.isFinite(nextServings) || nextServings < 1) {
+      setLocalError("Las raciones deben ser al menos 1.");
+      return;
+    }
+    if (ingredients.length === 0) {
+      setLocalError("Anade al menos un ingrediente.");
+      return;
+    }
+    if (steps.length === 0) {
+      setLocalError("Anade al menos un paso de preparacion.");
+      return;
+    }
+
+    const updated = await onUpdateRecipe(recipe.id, {
+      title: draft.title.trim(),
+      description: draft.description.trim(),
+      ingredients,
+      steps,
+      tags,
+      prep_time_minutes: Math.round(prepTimeMinutes),
+      difficulty: draft.difficulty.trim() || getRecipeDifficulty(prepTimeMinutes),
+      servings: Math.round(nextServings),
+    });
+    if (!updated) {
+      setLocalError("No se pudo guardar la receta.");
+      return;
+    }
+    setLocalError("");
+    setIsEditing(false);
+    setDraft(buildRecipeEditForm(updated));
+  }
+
+  return (
+    <form className="space-y-6" onSubmit={saveRecipe}>
+      <button className="text-sm font-semibold text-leaf hover:text-ink" onClick={onBack} type="button">
+        Volver a recetas
+      </button>
+
+      <section className="rounded-lg border border-line bg-white p-6 shadow-soft">
+        <div className="grid gap-6 xl:grid-cols-[1fr_auto] xl:items-start">
+          <div>
+            <p className="text-sm font-semibold uppercase text-leaf">Detalle de receta</p>
+            {isEditing ? (
+              <div className="mt-3 grid gap-3">
+                <label className="grid gap-2 text-sm font-semibold text-ink/70">
+                  Nombre
+                  <input
+                    className="rounded-lg border border-line bg-paper px-4 py-3 text-2xl font-bold text-ink"
+                    value={draft.title}
+                    onChange={(event) => setDraft((current) => (current ? { ...current, title: event.target.value } : current))}
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-semibold text-ink/70">
+                  Descripcion
+                  <textarea
+                    className="min-h-24 rounded-lg border border-line bg-paper px-4 py-3 text-sm font-normal leading-6 text-ink"
+                    value={draft.description}
+                    onChange={(event) => setDraft((current) => (current ? { ...current, description: event.target.value } : current))}
+                  />
+                </label>
+              </div>
+            ) : (
+              <>
+                <h2 className="mt-2 text-3xl font-bold leading-tight">{recipe.title}</h2>
+                <p className="mt-3 max-w-3xl text-sm leading-6 text-ink/70">{recipe.description}</p>
+              </>
+            )}
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-3 xl:max-w-2xl">
+              <label className="rounded-lg border border-line bg-paper px-4 py-3">
+                <span className="block text-xs font-semibold uppercase text-ink/55">Tiempo</span>
+                {isEditing ? (
+                  <input
+                    className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2 font-semibold"
+                    min={5}
+                    type="number"
+                    value={draft.prepTimeMinutes}
+                    onChange={(event) =>
+                      setDraft((current) => (current ? { ...current, prepTimeMinutes: event.target.value } : current))
+                    }
+                  />
+                ) : (
+                  <span className="mt-2 block font-semibold">{recipe.prep_time_minutes} min</span>
+                )}
+              </label>
+              <label className="rounded-lg border border-line bg-paper px-4 py-3">
+                <span className="block text-xs font-semibold uppercase text-ink/55">Dificultad</span>
+                {isEditing ? (
+                  <select
+                    className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2 font-semibold"
+                    value={draft.difficulty}
+                    onChange={(event) => setDraft((current) => (current ? { ...current, difficulty: event.target.value } : current))}
+                  >
+                    {recipeDifficultyOptions.filter((item) => item !== "Todas").map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="mt-2 block font-semibold">{difficulty}</span>
+                )}
+              </label>
+              <label className="rounded-lg border border-line bg-paper px-4 py-3">
+                <span className="block text-xs font-semibold uppercase text-ink/55">Raciones</span>
+                {isEditing ? (
+                  <input
+                    className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2 font-semibold"
+                    min={1}
+                    type="number"
+                    value={draft.servings}
+                    onChange={(event) => setDraft((current) => (current ? { ...current, servings: event.target.value } : current))}
+                  />
+                ) : (
+                  <span className="mt-2 block font-semibold">{servings} personas</span>
+                )}
+              </label>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-3 xl:justify-end">
+            <span className="inline-flex items-center rounded-lg border border-line bg-white px-4 py-3 text-sm font-semibold text-tomato">
+              Guardada
+            </span>
+            <button
+              className="rounded-lg bg-leaf px-5 py-3 font-semibold text-white disabled:opacity-60"
+              disabled={loading}
+              onClick={() => onUseInMenu(recipe)}
+              type="button"
+            >
+              Usar en menu
+            </button>
+            {isEditing ? (
+              <>
+                <button className="rounded-lg border border-line px-5 py-3 font-semibold text-ink/70" onClick={() => {
+                  setIsEditing(false);
+                  setLocalError("");
+                  setDraft(buildRecipeEditForm(recipe));
+                }} type="button">
+                  Cancelar
+                </button>
+                <button className="rounded-lg border border-leaf bg-white px-5 py-3 font-semibold text-leaf disabled:opacity-60" disabled={loading} type="submit">
+                  Guardar cambios
+                </button>
+              </>
+            ) : (
+              <button
+                className="rounded-lg border border-leaf bg-white px-5 py-3 font-semibold text-leaf"
+                onClick={() => setIsEditing(true)}
+                type="button"
+              >
+                Editar receta
+              </button>
+            )}
+          </div>
+        </div>
+
+        {localError ? <p className="mt-4 rounded-lg border border-tomato/30 bg-tomato/5 px-4 py-3 text-sm text-tomato">{localError}</p> : null}
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+        <div className="space-y-5">
+          <div className="overflow-hidden rounded-lg border border-line bg-white shadow-soft">
+            <img className="h-80 w-full object-cover" src={getRecipeImage(recipe, Math.max(recipeIndex, 0))} alt={`Receta ${recipe.title}`} />
+          </div>
+
+          <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xl font-semibold">Etiquetas</h3>
+              {isEditing ? <span className="text-xs font-semibold uppercase text-leaf">Editable</span> : null}
+            </div>
+            {isEditing ? (
+              <label className="mt-4 grid gap-2 text-sm font-semibold text-ink/70">
+                Separadas por coma
+                <input
+                  className="rounded-lg border border-line bg-paper px-4 py-3 font-normal text-ink"
+                  value={draft.tagsText}
+                  onChange={(event) => setDraft((current) => (current ? { ...current, tagsText: event.target.value } : current))}
+                />
+              </label>
+            ) : (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {recipe.tags.length ? (
+                  recipe.tags.map((tag) => (
+                    <span key={tag} className="rounded-lg border border-line bg-paper px-3 py-2 text-sm font-semibold text-ink/70">
+                      {tag}
+                    </span>
+                  ))
+                ) : (
+                  <p className="text-sm text-ink/70">Sin etiquetas.</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-leaf/20 bg-leaf/5 p-5">
+            <p className="font-semibold">Consejo del chef</p>
+            <p className="mt-2 text-sm leading-6 text-ink/75">{getRecipeTip(recipe)}</p>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-line bg-white p-6 shadow-soft">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold uppercase text-leaf">Bloque editable</p>
+              <h3 className="text-2xl font-semibold">Ingredientes</h3>
+            </div>
+            {isEditing ? (
+              <button
+                className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf"
+                onClick={() => setDraft((current) => (current ? { ...current, ingredients: [...current.ingredients, { name: "", quantity: "" }] } : current))}
+                type="button"
+              >
+                Anadir ingrediente
+              </button>
+            ) : null}
+          </div>
+
+          {isEditing ? (
+            <div className="mt-5 grid gap-3">
+              {draft.ingredients.map((ingredient, index) => (
+                <div key={index} className="grid gap-2 rounded-lg border border-line bg-paper p-3 md:grid-cols-[1fr_160px_auto]">
+                  <input
+                    className="rounded-lg border border-line bg-white px-3 py-2"
+                    placeholder="Ingrediente"
+                    value={ingredient.name}
+                    onChange={(event) => updateIngredient(index, "name", event.target.value)}
+                  />
+                  <input
+                    className="rounded-lg border border-line bg-white px-3 py-2"
+                    placeholder="Cantidad"
+                    value={ingredient.quantity}
+                    onChange={(event) => updateIngredient(index, "quantity", event.target.value)}
+                  />
+                  <button className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato" onClick={() => removeIngredient(index)} type="button">
+                    Quitar
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-5 divide-y divide-line">
+              {ingredientRows.length ? (
+                ingredientRows.map((ingredient, index) => (
+                  <div key={`${ingredient.name}-${index}`} className="grid gap-3 py-4 sm:grid-cols-[1fr_auto]">
+                    <p className="font-semibold">{ingredient.name}</p>
+                    <p className="text-sm font-semibold text-ink/60">{ingredient.quantity || "Al gusto"}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="py-4 text-sm text-ink/70">Sin ingredientes registrados.</p>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-line bg-white p-6 shadow-soft">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold uppercase text-leaf">Preparacion</p>
+            <h3 className="text-2xl font-semibold">Pasos de la receta</h3>
+          </div>
+          {isEditing ? (
+            <button
+              className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf"
+              onClick={() => setDraft((current) => (current ? { ...current, steps: [...current.steps, ""] } : current))}
+              type="button"
+            >
+              Anadir paso
+            </button>
+          ) : null}
+        </div>
+
+        <div className="mt-6 grid gap-4">
+          {isEditing ? (
+            draft.steps.map((step, index) => (
+              <div key={index} className="grid gap-3 rounded-lg border border-line bg-paper p-4 md:grid-cols-[42px_1fr_auto]">
+                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-leaf/10 text-sm font-semibold text-leaf">{index + 1}</span>
+                <textarea
+                  className="min-h-24 rounded-lg border border-line bg-white px-4 py-3 text-sm leading-6"
+                  placeholder="Describe este paso"
+                  value={step}
+                  onChange={(event) => updateStep(index, event.target.value)}
+                />
+                <button className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato md:self-start" onClick={() => removeStep(index)} type="button">
+                  Quitar
+                </button>
+              </div>
+            ))
+          ) : recipe.steps.length ? (
+            recipe.steps.map((step, index) => (
+              <article key={`${step}-${index}`} className="grid gap-4 rounded-lg border border-line bg-paper p-4 md:grid-cols-[42px_1fr]">
+                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-leaf/10 text-sm font-semibold text-leaf">{index + 1}</span>
+                <p className="text-sm leading-7 text-ink/80">{step}</p>
+              </article>
+            ))
+          ) : (
+            <p className="rounded-lg border border-dashed border-line bg-paper p-5 text-sm text-ink/70">Sin pasos registrados.</p>
+          )}
+        </div>
+      </section>
+    </form>
   );
 }
 
