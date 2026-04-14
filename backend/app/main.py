@@ -297,10 +297,18 @@ def delete_recipe(recipe_id: str, session: Session = Depends(get_session)) -> No
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
 
+    affected_menu_items = 0
     for item in session.scalars(select(MenuItem).where(MenuItem.recipe_id == recipe_id)):
         item.recipe_id = None
+        affected_menu_items += 1
     session.delete(recipe)
     session.commit()
+    record_log(
+        "info",
+        "database",
+        "Receta eliminada del recetario",
+        {"recipe_id": recipe_id, "affected_menu_items": affected_menu_items},
+    )
 
 
 @app.post("/recipes/{recipe_id}/variant", response_model=RecipeOut, status_code=status.HTTP_201_CREATED)
@@ -440,6 +448,7 @@ def replace_menu_item(
         source=generated.get("ai_model") or (settings.gemini_model if settings.has_valid_gemini_api_key else "fallback-local"),
     )
     item.recipe_id = recipe.id
+    item.recipe = recipe
     item.explanation = generated["explanation"]
     session.commit()
     session.refresh(menu)
@@ -466,6 +475,7 @@ def use_saved_recipe(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
 
     item.recipe_id = recipe.id
+    item.recipe = recipe
     item.explanation = "Receta guardada repetida a peticion del usuario."
     session.commit()
     session.refresh(menu)

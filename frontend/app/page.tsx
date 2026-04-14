@@ -880,7 +880,9 @@ export default function Home() {
                 expiringIngredients={expiringIngredients}
                 ingredientCount={ingredients.length}
                 latestRecipes={latestRecipes}
+                loading={loading}
                 menu={menu}
+                onReplace={replaceItem}
                 quickStats={quickStats}
                 setActiveView={setActiveView}
               />
@@ -1187,13 +1189,44 @@ function IngredientModal({
   );
 }
 
+function MissingRecipeState({
+  compact = false,
+  loading,
+  onReplace,
+}: {
+  compact?: boolean;
+  loading: boolean;
+  onReplace: () => void;
+}) {
+  return (
+    <div className={compact ? "mt-2 rounded-lg border border-tomato/20 bg-tomato/5 p-3" : "rounded-lg border border-dashed border-tomato/30 bg-white p-4"}>
+      <p className={compact ? "text-sm font-semibold text-ink" : "font-semibold text-ink"}>Plato no disponible</p>
+      <p className={compact ? "mt-1 text-xs leading-5 text-ink/65" : "mt-2 text-sm leading-6 text-ink/70"}>
+        Esta receta ya no esta disponible.
+      </p>
+      <button
+        className={compact
+          ? "mt-3 rounded-lg border border-tomato px-3 py-2 text-xs font-semibold text-tomato disabled:opacity-60"
+          : "mt-4 rounded-lg bg-leaf px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"}
+        disabled={loading}
+        onClick={onReplace}
+        type="button"
+      >
+        Sustituir plato
+      </button>
+    </div>
+  );
+}
+
 function DashboardView({
   currentMenuDayIndex,
   dashboardDays,
   expiringIngredients,
   ingredientCount,
   latestRecipes,
+  loading,
   menu,
+  onReplace,
   quickStats,
   setActiveView,
 }: {
@@ -1202,7 +1235,9 @@ function DashboardView({
   expiringIngredients: Ingredient[];
   ingredientCount: number;
   latestRecipes: Recipe[];
+  loading: boolean;
   menu: WeeklyMenu | null;
+  onReplace: (itemId: string) => void;
   quickStats: { label: string; value: string; detail: string }[];
   setActiveView: (view: ViewId) => void;
 }) {
@@ -1280,7 +1315,11 @@ function DashboardView({
                       {[...items].sort((left, right) => mealRank(left.meal_type) - mealRank(right.meal_type)).map((item) => (
                         <div key={item.id} className={`rounded-lg border bg-white px-3 py-2 ${isToday ? "border-leaf/30" : "border-line"}`}>
                           <p className="text-xs font-semibold uppercase text-leaf">{item.meal_type}</p>
-                          <p className="mt-1 text-sm font-semibold">{item.recipe?.title ?? "Receta eliminada"}</p>
+                          {item.recipe ? (
+                            <p className="mt-1 text-sm font-semibold">{item.recipe.title}</p>
+                          ) : (
+                            <MissingRecipeState compact loading={loading} onReplace={() => onReplace(item.id)} />
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1397,7 +1436,7 @@ function MenuView({
                       <div className="mb-3 flex items-start justify-between gap-3">
                         <div>
                           <p className="text-xs font-semibold uppercase text-leaf">{item.meal_type}</p>
-                          <h4 className="mt-1 text-lg font-semibold">{item.recipe?.title ?? "Receta eliminada"}</h4>
+                          <h4 className="mt-1 text-lg font-semibold">{item.recipe?.title ?? "Plato no disponible"}</h4>
                         </div>
                         {item.recipe ? (
                           <span className="rounded bg-yolk px-2 py-1 text-xs font-semibold">
@@ -1405,50 +1444,56 @@ function MenuView({
                           </span>
                         ) : null}
                       </div>
-                      <p className="text-sm leading-6 text-ink/75">{item.recipe?.description}</p>
-                      <div className="mt-3 rounded-lg border border-leaf/20 bg-white px-3 py-2">
-                        <p className="text-xs font-semibold uppercase text-leaf">Por que este plato</p>
-                        <p className="mt-1 text-sm leading-6 text-ink/75">{item.explanation}</p>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {item.recipe?.tags.map((tag) => (
-                          <span key={tag} className="rounded border border-line bg-white px-2 py-1 text-xs">
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="mt-4 grid gap-2">
-                        <button
-                          className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato disabled:opacity-60"
-                          disabled={loading}
-                          onClick={() => onReplace(item.id)}
-                          type="button"
-                        >
-                          Sustituir plato
-                        </button>
-                        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                          <select
-                            className="rounded-lg border border-line bg-white px-3 py-2 text-sm"
-                            value={selectedRecipes[item.id] ?? ""}
-                            onChange={(event) => setSelectedRecipes({ ...selectedRecipes, [item.id]: event.target.value })}
-                          >
-                            <option value="">Repetir receta guardada</option>
-                            {recipes.map((recipe) => (
-                              <option key={recipe.id} value={recipe.id}>
-                                {recipe.title}
-                              </option>
+                      {item.recipe ? (
+                        <>
+                          <p className="text-sm leading-6 text-ink/75">{item.recipe.description}</p>
+                          <div className="mt-3 rounded-lg border border-leaf/20 bg-white px-3 py-2">
+                            <p className="text-xs font-semibold uppercase text-leaf">Por que este plato</p>
+                            <p className="mt-1 text-sm leading-6 text-ink/75">{item.explanation}</p>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {item.recipe.tags.map((tag) => (
+                              <span key={tag} className="rounded border border-line bg-white px-2 py-1 text-xs">
+                                {tag}
+                              </span>
                             ))}
-                          </select>
-                          <button
-                            className="rounded-lg bg-ink px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                            disabled={loading || !selectedRecipes[item.id]}
-                            onClick={() => onUseSavedRecipe(item.id)}
-                            type="button"
-                          >
-                            Usar
-                          </button>
-                        </div>
-                      </div>
+                          </div>
+                          <div className="mt-4 grid gap-2">
+                            <button
+                              className="rounded-lg border border-tomato px-3 py-2 text-sm font-semibold text-tomato disabled:opacity-60"
+                              disabled={loading}
+                              onClick={() => onReplace(item.id)}
+                              type="button"
+                            >
+                              Sustituir plato
+                            </button>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                              <select
+                                className="rounded-lg border border-line bg-white px-3 py-2 text-sm"
+                                value={selectedRecipes[item.id] ?? ""}
+                                onChange={(event) => setSelectedRecipes({ ...selectedRecipes, [item.id]: event.target.value })}
+                              >
+                                <option value="">Repetir receta guardada</option>
+                                {recipes.map((recipe) => (
+                                  <option key={recipe.id} value={recipe.id}>
+                                    {recipe.title}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                className="rounded-lg bg-ink px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                                disabled={loading || !selectedRecipes[item.id]}
+                                onClick={() => onUseSavedRecipe(item.id)}
+                                type="button"
+                              >
+                                Usar
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <MissingRecipeState loading={loading} onReplace={() => onReplace(item.id)} />
+                      )}
                     </article>
                   ))}
                 </div>

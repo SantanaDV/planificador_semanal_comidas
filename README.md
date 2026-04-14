@@ -190,6 +190,8 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
     Funciono porque mejora la UX de decision: modal antes de redirigir, minimo de ingredientes y aviso previo antes de usar modo demo.
 18. "Mejorar la gestion de ingredientes con modal, categorias en base de datos, caducidad y filtros."
     Funciono porque convierte la nevera en una fuente de datos mas realista para IA: categorias controladas, orden por caducidad y cantidad completa sin depender de texto libre de unidad.
+19. "Corregir como se muestran las recetas eliminadas en el menu semanal y en el dashboard."
+    Funciono porque cubre un caso de borde del MVP: el menu conserva su estructura aunque falte la receta y ofrece sustituir el plato sin mostrar un texto tecnico o descuidado.
 
 ## Guion sugerido para video de 3 minutos
 

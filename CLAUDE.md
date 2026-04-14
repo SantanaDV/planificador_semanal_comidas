@@ -193,6 +193,7 @@ Fase 4, pulido:
 - Prompt resenable anadido: "Eliminar mocks hardcodeados y sustituirlos por estados vacios, datos demo bajo demanda y fallback documentado." Funciono porque diferencia datos reales, carga demo persistida y fallback local sin depender de mocks de UI.
 - Prompt resenable anadido: "Corregir el flujo de generacion cuando faltan ingredientes o falta la clave de IA." Funciono porque evita redirecciones inesperadas y convierte las validaciones en decisiones explicitas del usuario.
 - Prompt resenable anadido: "Mejorar la gestion de ingredientes con modal, categorias en base de datos, caducidad y filtros." Funciono porque convierte la nevera en una fuente de datos mas realista para IA y elimina el campo unidad libre del flujo principal.
+- Prompt resenable anadido: "Corregir como se muestran las recetas eliminadas en el menu semanal y en el dashboard." Funciono porque mejora un caso de borde real sin cambiar la relacion de datos: `menu_items.recipe_id` puede quedar a null y la UI lo resuelve con un estado accionable.
 
 ## Politica Git y control de versiones
 
@@ -349,6 +350,14 @@ Fase 4, pulido:
 - La vista Ingredientes deja de mostrar formulario fijo y usa un modal de alta con nombre, categoria, cantidad y calendario de caducidad.
 - Los filtros de Ingredientes incluyen busqueda, categoria y orden por caducidad ASC/DESC o cantidad parseada del texto.
 
+## Cambios implementados tras recetas eliminadas en menu
+
+- Se mantiene la estrategia de datos existente: al eliminar una receta asociada a un menu, el backend limpia `menu_items.recipe_id` y conserva el hueco del menu.
+- El backend registra cuantos `menu_items` quedaron afectados cuando se borra una receta.
+- Se corrige la respuesta de sustitucion/reutilizacion para que, tras rellenar un hueco que tenia `recipe_id = NULL`, la relacion `item.recipe` quede actualizada en memoria antes de serializar el menu.
+- La UI deja de mostrar "Receta eliminada" y renderiza "Plato no disponible" con el texto "Esta receta ya no esta disponible".
+- El dashboard y la vista Menu semanal ofrecen una accion `Sustituir plato` para resolver el hueco sin romper el menu.
+
 ## Estandar de logging y errores
 
 - Logging es una preocupacion transversal. Cada nueva funcionalidad o correccion debe registrar eventos relevantes con `level`, `module`, `message`, `context`, `stack_trace` opcional y `created_at`.
@@ -497,3 +506,10 @@ Fase 4, pulido:
 - Smoke test Docker/API real: `GET /health` 200, `GET /ingredient-categories` devuelve 8 categorias, `POST /ingredients` con caducidad 201 y `DELETE /ingredients/{id}` 204 para un ingrediente temporal.
 - `curl http://localhost:8000/ingredients`: OK. Los ingredientes demo legacy quedan con `category_id`, cantidad completa y `expires_at`.
 - `curl -I http://localhost:3000`: HTTP 200.
+
+## Verificacion tras recetas eliminadas en menu
+
+- `python3 -m compileall backend/app`: OK.
+- `git diff --check -- backend/app/main.py frontend/app/page.tsx CLAUDE.md README.md RTK.md`: OK.
+- `npm run build` en frontend: OK.
+- Smoke test backend con SQLite temporal y `GEMINI_API_KEY=` usando dependencias en `/tmp/menu-backend-deps`: OK. Valida generar menu, eliminar una receta asociada, obtener `recipe: null` en el hueco y sustituir ese `menu_item` devolviendo de nuevo una receta.
