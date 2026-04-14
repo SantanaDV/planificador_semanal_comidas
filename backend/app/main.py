@@ -35,6 +35,7 @@ from .schemas import (
 
 DEMO_USER_ID = "demo-user"
 MIN_INGREDIENTS_FOR_MENU = 5
+PANTRY_BASICS = ["aceite de oliva", "sal", "pimienta", "sal y pimienta", "agua"]
 
 
 @asynccontextmanager
@@ -357,20 +358,28 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             ),
         )
 
-    previous_titles = _recent_recipe_titles(session)
-    compatible_recipe_titles, favorite_recipe_titles = _compatible_saved_recipe_context(
+    previous_titles = _previous_menu_recipe_titles(session)
+    compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
         payload.excluded_ingredient_ids,
+        previous_titles,
         session,
     )
-    generation_preferences = _preferences_with_compatible_recipes(
+    compatible_recipe_titles = [recipe["title"] for recipe in compatible_saved_recipes if not recipe["is_recent"]]
+    favorite_recipe_titles = [
+        recipe["title"] for recipe in compatible_saved_recipes if recipe["is_favorite"] and not recipe["is_recent"]
+    ]
+    generation_context = _build_generation_context(
         payload.preferences,
-        compatible_recipe_titles,
-        favorite_recipe_titles,
+        all_ingredients,
+        ingredients,
+        payload.excluded_ingredient_ids,
+        previous_titles,
+        compatible_saved_recipes,
     )
     try:
-        generated = ai.generate_weekly_menu(ingredients, generation_preferences, previous_titles)
+        generated = ai.generate_weekly_menu(ingredients, generation_context)
     except Exception as exc:
         record_exception(
             "menu_planning",
@@ -392,9 +401,13 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         week_start_date=payload.week_start_date or _current_week_start(),
         preferences={
             "text": payload.preferences,
+            "summary": generation_context["preferences_summary"],
             "excluded_ingredient_ids": payload.excluded_ingredient_ids,
+            "excluded_ingredient_names": generation_context["excluded_ingredient_names"],
             "compatible_recipe_titles": compatible_recipe_titles,
             "favorite_recipe_titles": favorite_recipe_titles,
+            "recent_recipe_titles": previous_titles,
+            "pantry_basics": PANTRY_BASICS,
         },
         generated_from_ingredients=[ingredient["name"] for ingredient in ingredients if ingredient.get("name")],
         ai_model=generated.get("ai_model", settings.gemini_model),
@@ -473,22 +486,30 @@ def replace_menu_item(
             ),
         )
 
-    compatible_recipe_titles, favorite_recipe_titles = _compatible_saved_recipe_context(
+    recent_titles = _replacement_recipe_titles(session, menu.id)
+    compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
         payload.excluded_ingredient_ids,
+        recent_titles,
         session,
     )
-    generation_preferences = _preferences_with_compatible_recipes(
+    compatible_recipe_titles = [recipe["title"] for recipe in compatible_saved_recipes if not recipe["is_recent"]]
+    favorite_recipe_titles = [
+        recipe["title"] for recipe in compatible_saved_recipes if recipe["is_favorite"] and not recipe["is_recent"]
+    ]
+    generation_context = _build_generation_context(
         payload.preferences,
-        compatible_recipe_titles,
-        favorite_recipe_titles,
+        all_ingredients,
+        ingredients,
+        payload.excluded_ingredient_ids,
+        recent_titles,
+        compatible_saved_recipes,
     )
     try:
         generated = ai.generate_replacement(
             ingredients,
-            generation_preferences,
-            _recent_recipe_titles(session),
+            generation_context,
             item.day_index,
             item.meal_type,
         )
@@ -842,9 +863,10 @@ def _compatible_saved_recipe_context(
     all_ingredients: list[dict[str, str | None]],
     usable_ingredients: list[dict[str, str | None]],
     excluded_ingredient_ids: list[str],
+    recent_recipe_titles: list[str],
     session: Session,
     limit: int = 8,
-) -> tuple[list[str], list[str]]:
+) -> list[dict[str, Any]]:
     usable_names = {
         normalize_label(str(ingredient.get("name") or ""))
         for ingredient in usable_ingredients
@@ -856,8 +878,9 @@ def _compatible_saved_recipe_context(
         for ingredient in all_ingredients
         if ingredient.get("id") in excluded_ids and ingredient.get("name")
     }
+    recent_titles = {normalize_label(title) for title in recent_recipe_titles if title.strip()}
     if not usable_names:
-        return [], []
+        return []
 
     recipes = session.scalars(
         select(Recipe)
@@ -865,24 +888,67 @@ def _compatible_saved_recipe_context(
         .order_by(Recipe.is_favorite.desc(), Recipe.created_at.desc())
         .limit(50)
     ).all()
-    titles: list[str] = []
-    favorite_titles: list[str] = []
+    compatible_recipes: list[dict[str, Any]] = []
     for recipe in recipes:
         recipe_ingredient_names = [
             _normalize_recipe_ingredient_name(str(value))
             for value in (recipe.ingredients or [])
             if str(value).strip()
         ]
-        if excluded_names and any(_ingredient_name_matches(recipe_name, excluded_name) for recipe_name in recipe_ingredient_names for excluded_name in excluded_names):
+        if not recipe_ingredient_names:
             continue
-        if not any(_ingredient_name_matches(recipe_name, usable_name) for recipe_name in recipe_ingredient_names for usable_name in usable_names):
+        if excluded_names and any(
+            _ingredient_name_matches(recipe_name, excluded_name)
+            for recipe_name in recipe_ingredient_names
+            for excluded_name in excluded_names
+        ):
             continue
-        if recipe.is_favorite and len(favorite_titles) < limit:
-            favorite_titles.append(recipe.title)
-        titles.append(recipe.title)
-        if len(titles) >= limit:
-            break
-    return titles, favorite_titles
+        matched_ingredients: list[str] = []
+        incompatible = False
+        for recipe_name in recipe_ingredient_names:
+            if _is_pantry_basic(recipe_name):
+                continue
+            matched_name = next(
+                (usable_name for usable_name in usable_names if _ingredient_name_matches(recipe_name, usable_name)),
+                None,
+            )
+            if not matched_name:
+                incompatible = True
+                break
+            matched_ingredients.append(matched_name)
+
+        if incompatible or not matched_ingredients:
+            continue
+        compatible_recipes.append(
+            {
+                "id": recipe.id,
+                "title": recipe.title,
+                "description": recipe.description,
+                "ingredients": recipe.ingredients or [],
+                "steps": recipe.steps or [],
+                "tags": recipe.tags or [],
+                "prep_time_minutes": recipe.prep_time_minutes,
+                "difficulty": recipe.difficulty or _difficulty_from_minutes(recipe.prep_time_minutes),
+                "servings": recipe.servings or 2,
+                "image_url": recipe.image_url,
+                "source": recipe.source,
+                "is_favorite": recipe.is_favorite,
+                "is_recent": normalize_label(recipe.title) in recent_titles,
+                "matched_ingredient_names": sorted(set(matched_ingredients)),
+                "matched_ingredient_count": len(set(matched_ingredients)),
+                "created_at": recipe.created_at.isoformat() if recipe.created_at else "",
+            }
+        )
+
+    compatible_recipes.sort(
+        key=lambda recipe: (
+            not bool(recipe["is_favorite"]),
+            bool(recipe["is_recent"]),
+            -int(recipe["matched_ingredient_count"]),
+            recipe["created_at"],
+        )
+    )
+    return compatible_recipes[:limit]
 
 
 def _normalize_recipe_ingredient_name(value: str) -> str:
@@ -896,12 +962,67 @@ def _ingredient_name_matches(recipe_name: str, fridge_name: str) -> bool:
     return recipe_name in fridge_name or fridge_name in recipe_name
 
 
+def _is_pantry_basic(recipe_name: str) -> bool:
+    return any(_ingredient_name_matches(recipe_name, normalize_label(value)) for value in PANTRY_BASICS)
+
+
+def _build_generation_context(
+    preferences: str,
+    all_ingredients: list[dict[str, str | None]],
+    usable_ingredients: list[dict[str, str | None]],
+    excluded_ingredient_ids: list[str],
+    recent_recipe_titles: list[str],
+    compatible_saved_recipes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
+    excluded_ingredient_names = [
+        str(ingredient.get("name"))
+        for ingredient in all_ingredients
+        if ingredient.get("id") in excluded_ids and ingredient.get("name")
+    ]
+    compatible_recipe_titles = [recipe["title"] for recipe in compatible_saved_recipes if not recipe["is_recent"]]
+    favorite_recipe_titles = [
+        recipe["title"] for recipe in compatible_saved_recipes if recipe["is_favorite"] and not recipe["is_recent"]
+    ]
+    return {
+        "preferences_text": preferences.strip(),
+        "preferences_summary": _preferences_with_compatible_recipes(
+            preferences,
+            compatible_recipe_titles,
+            favorite_recipe_titles,
+        ),
+        "available_ingredients": ingredients_for_generation(usable_ingredients),
+        "excluded_ingredient_names": excluded_ingredient_names,
+        "recent_recipe_titles": recent_recipe_titles,
+        "compatible_saved_recipes": compatible_saved_recipes,
+        "compatible_recipe_titles": compatible_recipe_titles,
+        "favorite_recipe_titles": favorite_recipe_titles,
+        "pantry_basics": PANTRY_BASICS,
+    }
+
+
+def ingredients_for_generation(ingredients: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
+    return [
+        {
+            "name": ingredient.get("name"),
+            "quantity": ingredient.get("quantity"),
+            "category": ingredient.get("category"),
+            "expires_at": ingredient.get("expires_at"),
+        }
+        for ingredient in ingredients
+        if ingredient.get("name")
+    ]
+
+
 def _preferences_with_compatible_recipes(
     preferences: str,
     compatible_recipe_titles: list[str],
     favorite_recipe_titles: list[str],
 ) -> str:
     parts = [preferences.strip()]
+    parts.append(
+        "Usa la nevera real como base del menu y no introduzcas ingredientes principales fuera de lo disponible."
+    )
     if favorite_recipe_titles:
         parts.append(
             "Recetas favoritas compatibles que debes priorizar si encajan sin forzarlas: "
@@ -912,6 +1033,12 @@ def _preferences_with_compatible_recipes(
         parts.append(
             "Recetas guardadas compatibles que puedes reutilizar si encajan: "
             + ", ".join(compatible_recipe_titles)
+            + "."
+        )
+    if PANTRY_BASICS:
+        parts.append(
+            "Basicos de despensa permitidos solo como apoyo y nunca como ingrediente principal: "
+            + ", ".join(PANTRY_BASICS)
             + "."
         )
     return " ".join(part for part in parts if part)
@@ -932,16 +1059,33 @@ def _insufficient_ingredient_detail(
     return f"Necesitas al menos {MIN_INGREDIENTS_FOR_MENU} ingredientes para generar un menu semanal util."
 
 
-def _recent_recipe_titles(session: Session, limit: int = 24) -> list[str]:
-    return list(
-        session.scalars(
-            select(Recipe.title)
-            .join(MenuItem, MenuItem.recipe_id == Recipe.id)
-            .where(Recipe.user_id == DEMO_USER_ID)
-            .order_by(MenuItem.created_at.desc())
-            .limit(limit)
-        )
+def _previous_menu_recipe_titles(session: Session, exclude_menu_id: str | None = None) -> list[str]:
+    statement = (
+        select(WeeklyMenu)
+        .where(WeeklyMenu.user_id == DEMO_USER_ID)
+        .order_by(WeeklyMenu.week_start_date.desc(), WeeklyMenu.created_at.desc())
     )
+    if exclude_menu_id:
+        statement = statement.where(WeeklyMenu.id != exclude_menu_id)
+    menu = session.scalar(statement)
+    if not menu:
+        return []
+    return [item.recipe.title for item in menu.items if item.recipe and item.recipe.title]
+
+
+def _replacement_recipe_titles(session: Session, menu_id: str) -> list[str]:
+    current_menu = _get_menu(session, menu_id)
+    current_titles = [item.recipe.title for item in current_menu.items if item.recipe and item.recipe.title]
+    previous_titles = _previous_menu_recipe_titles(session, exclude_menu_id=menu_id)
+    seen: set[str] = set()
+    ordered_titles: list[str] = []
+    for title in current_titles + previous_titles:
+        normalized_title = normalize_label(title)
+        if normalized_title in seen:
+            continue
+        seen.add(normalized_title)
+        ordered_titles.append(title)
+    return ordered_titles
 
 
 def _get_menu(session: Session, menu_id: str) -> WeeklyMenu:
