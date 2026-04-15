@@ -13,6 +13,12 @@ export type IngredientCategory = {
   sort_order: number;
 };
 
+export type RecipeImageCandidate = {
+  image_url: string;
+  image_source_url: string;
+  image_alt_text?: string | null;
+};
+
 export type Recipe = {
   id: string;
   title: string;
@@ -26,6 +32,8 @@ export type Recipe = {
   image_url?: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
+  image_candidates?: RecipeImageCandidate[] | null;
+  image_candidate_index?: number | null;
   image_lookup_status?: "pending" | "found" | "not_found" | "invalid" | "attempts_exhausted" | "upstream_error" | null;
   image_lookup_reason?: string | null;
   image_lookup_attempt_count?: number | null;
@@ -110,6 +118,7 @@ export type RecipeMutationPayload = {
   image_url: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
+  image_candidate_index?: number | null;
   image_lookup_status?: "pending" | "found" | "not_found" | "invalid" | "attempts_exhausted" | "upstream_error" | null;
   image_lookup_reason?: string | null;
   is_favorite: boolean;
@@ -368,6 +377,9 @@ export function getRecipeImageReason(recipe: Recipe) {
   if (recipe.image_lookup_status === "attempts_exhausted") {
     return normalizedReason || "Ya se agotaron las alternativas disponibles para esta receta. Se mantendra el placeholder.";
   }
+  if (!getRecipeImage(recipe) && candidateCount > 0) {
+    return normalizedReason || "Hay alternativas de imagen guardadas para esta receta. Puedes revisarlas y elegir una desde el detalle.";
+  }
   if (normalizedReason === legacyFallbackReason) {
     return "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.";
   }
@@ -382,6 +394,7 @@ export function getRecipeImageReason(recipe: Recipe) {
 
 export function getRecipeImageStatus(recipe: Recipe) {
   if (getRecipeImage(recipe)) return "Imagen encontrada";
+  if ((recipe.image_candidate_count ?? 0) > 0) return "Sin foto seleccionada";
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined || recipe.image_lookup_status === "pending") return "Pendiente de resolver";
   if (recipe.image_lookup_status === "upstream_error") return "Error temporal de resolucion";
   if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
@@ -416,6 +429,7 @@ export function formatRetryCountdown(totalSeconds: number) {
 
 export function canAutoResolveRecipeImage(recipe: Recipe) {
   if (getRecipeImage(recipe)) return false;
+  if ((recipe.image_candidate_count ?? 0) > 0) return false;
   const status = recipe.image_lookup_status;
   return (status === null || status === undefined || status === "pending") && recipe.image_can_retry !== false;
 }

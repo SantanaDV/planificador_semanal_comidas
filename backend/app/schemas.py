@@ -45,6 +45,12 @@ class AiStatusOut(BaseModel):
 ImageLookupStatus = Literal["pending", "found", "not_found", "invalid", "attempts_exhausted", "upstream_error"]
 
 
+class RecipeImageCandidateOut(BaseModel):
+    image_url: str = Field(max_length=500)
+    image_source_url: str = Field(max_length=500)
+    image_alt_text: str | None = Field(default=None, max_length=240)
+
+
 class RecipeCreate(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     description: str = ""
@@ -65,6 +71,8 @@ class RecipeCreate(BaseModel):
 
 class RecipeOut(RecipeCreate):
     id: str
+    image_candidates: list[RecipeImageCandidateOut] = Field(default_factory=list)
+    image_candidate_index: int | None = None
     image_lookup_attempt_count: int = 0
     image_candidate_count: int = 0
     image_candidate_position: int = 0
@@ -88,6 +96,7 @@ class RecipeUpdate(BaseModel):
     image_url: str | None = Field(default=None, max_length=500)
     image_source_url: str | None = Field(default=None, max_length=500)
     image_alt_text: str | None = Field(default=None, max_length=240)
+    image_candidate_index: int | None = None
     image_lookup_status: ImageLookupStatus | None = None
     image_lookup_reason: str | None = Field(default=None, max_length=240)
     is_favorite: bool | None = None

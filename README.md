@@ -85,6 +85,8 @@ GEMINI_MODEL=gemini-2.5-flash-lite
 
 ### 4. Levantar la aplicacion
 
+Esto se debe arrancar desde donde tengas el docker-commpose.yml.
+
 ```bash
 docker compose up --build
 ```
@@ -671,6 +673,23 @@ Fijo bien el alcance. En lugar de mover medio frontend, la refactorizacion se ce
 
 **Qué se ajustó después:**
 `page.tsx` paso de 3778 a 2101 lineas manteniendo la misma UX visible, el mismo contrato con backend y la misma orquestacion principal dentro de `Home`.
+
+---
+
+## 20. Galeria de alternativas para imagenes de receta
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Dejar atras el flujo ciego de “probar otra imagen” y convertir la seleccion de imagen en una galeria real sobre candidatos ya cacheados.
+
+**Prompt usado:**
+
+> Si una receta ya tiene candidatos de imagen cacheados, no quiero mas reintentos lineales. Quiero navegar libremente entre alternativas, volver a una anterior, elegir una como definitiva o dejar la receta sin foto, sin lanzar nuevas busquedas.
+
+**Por qué funcionó:**
+Obligo a separar dos conceptos que antes estaban mezclados: la alternativa que el usuario esta previsualizando y la foto que queda finalmente persistida. Con ese ajuste, el backend conserva el cache y el frontend puede tratarlo como una galeria pequena y estable.
+
+**Qué se ajustó después:**
+La receta ahora expone `image_candidates` e `image_candidate_index`, el detalle permite moverse con `Anterior` y `Siguiente`, elegir `Usar esta imagen` o `Quitar foto`, y la busqueda HTTP solo se vuelve a lanzar cuando de verdad no hay candidatos guardados.
 
 ---
 

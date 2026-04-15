@@ -22,6 +22,7 @@ import {
   parseIngredientLine,
   recipeDifficultyOptions,
   type Recipe,
+  type RecipeImageCandidate,
   type RecipeEditForm,
   type RecipeIngredientDraft,
   type RecipeUpdatePayload,
@@ -52,15 +53,31 @@ export function RecipeDetailView({
   const [autoResolveRequestedFor, setAutoResolveRequestedFor] = useState<string | null>(null);
   const [draft, setDraft] = useState<RecipeEditForm | null>(() => (recipe ? buildRecipeEditForm(recipe) : null));
   const [imageStatusNow, setImageStatusNow] = useState(() => Date.now());
+  const [previewCandidateIndex, setPreviewCandidateIndex] = useState<number | null>(null);
 
   useEffect(() => {
     setIsEditing(false);
     setLocalError("");
     setAutoResolveRequestedFor(null);
+    setPreviewCandidateIndex(null);
   }, [recipe?.id]);
 
   useEffect(() => {
     setDraft(recipe ? buildRecipeEditForm(recipe) : null);
+    setPreviewCandidateIndex((current) => {
+      if (!recipe) return null;
+      const candidates = recipe.image_candidates ?? [];
+      if (!candidates.length) return null;
+      if (current !== null && current >= 0 && current < candidates.length) return current;
+      if (
+        typeof recipe.image_candidate_index === "number" &&
+        recipe.image_candidate_index >= 0 &&
+        recipe.image_candidate_index < candidates.length
+      ) {
+        return recipe.image_candidate_index;
+      }
+      return 0;
+    });
   }, [recipe]);
 
   useEffect(() => {
@@ -98,40 +115,75 @@ export function RecipeDetailView({
   const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
   const servings = getRecipeServings(recipe);
   const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
-  const canResolveImage = imageResolutionEnabled && !isEditing && Boolean(recipe.image_can_retry);
-  const hasImageCandidates = (recipe.image_candidate_count ?? 0) > 0;
-  const noMoreImageAlternatives =
-    Boolean(getRecipeImage(recipe)) &&
-    hasImageCandidates &&
-    !recipe.image_can_retry &&
-    (recipe.image_candidate_position ?? 0) >= (recipe.image_candidate_count ?? 0);
+  const candidates = recipe.image_candidates ?? [];
+  const hasImageCandidates = candidates.length > 0;
+  const persistedCandidateIndex =
+    typeof recipe.image_candidate_index === "number" && recipe.image_candidate_index >= 0 && recipe.image_candidate_index < candidates.length
+      ? recipe.image_candidate_index
+      : null;
+  const effectivePreviewCandidateIndex =
+    previewCandidateIndex !== null && previewCandidateIndex >= 0 && previewCandidateIndex < candidates.length
+      ? previewCandidateIndex
+      : null;
+  const previewCandidate: RecipeImageCandidate | null =
+    effectivePreviewCandidateIndex !== null ? candidates[effectivePreviewCandidateIndex] : null;
+  const previewRecipe: Recipe =
+    previewCandidate && !imageResolutionPending
+      ? {
+          ...recipe,
+          image_url: previewCandidate.image_url,
+          image_source_url: previewCandidate.image_source_url,
+          image_alt_text: previewCandidate.image_alt_text ?? `Imagen de ${recipe.title}.`,
+        }
+      : recipe;
+  const canResolveImage = imageResolutionEnabled && !isEditing && !hasImageCandidates && Boolean(recipe.image_can_retry);
   const imageRetryLabel = imageRetryCountdown ? formatRetryCountdown(imageRetryCountdown) : null;
   const imageActionLabel =
     imageRetryLabel
       ? `Reintentar en ${imageRetryLabel}`
-      : getRecipeImage(recipe)
-        ? "Probar otra imagen"
-        : recipe.image_lookup_status === "pending" || recipe.image_lookup_status === null || recipe.image_lookup_status === undefined
-          ? "Buscar imagen"
-          : "Reintentar imagen";
-  const detailImageStatus = imageResolutionPending ? "Buscando imagen real" : getRecipeImageStatus(recipe);
+      : recipe.image_lookup_status === "pending" || recipe.image_lookup_status === null || recipe.image_lookup_status === undefined
+        ? "Buscar imagen"
+        : "Reintentar imagen";
+  const detailImageStatus = imageResolutionPending
+    ? "Buscando imagen real"
+    : previewCandidate
+      ? persistedCandidateIndex === effectivePreviewCandidateIndex && getRecipeImage(recipe)
+        ? "Imagen seleccionada"
+        : "Vista previa de alternativa"
+      : getRecipeImageStatus(recipe);
   const detailImageCaption = imageResolutionPending
     ? "Estamos buscando paginas relevantes para esta receta y validando sus imagenes."
-    : getRecipeImageCaption(recipe);
+    : previewCandidate
+      ? recipe.description || `Vista previa de una alternativa de imagen para ${recipe.title}.`
+      : getRecipeImageCaption(recipe);
   const detailImageAltText = imageResolutionPending
     ? "Buscando una imagen real para esta receta."
-    : getRecipeAltText(recipe);
+    : previewCandidate
+      ? previewCandidate.image_alt_text?.trim() || `Imagen de ${recipe.title}.`
+      : getRecipeAltText(recipe);
   const detailImageReason = imageResolutionPending
     ? "Consultando paginas externas por HTTP y validando que la imagen sea real y reutilizable."
+    : previewCandidate && effectivePreviewCandidateIndex !== null
+      ? persistedCandidateIndex === effectivePreviewCandidateIndex && getRecipeImage(recipe)
+        ? `Esta es la imagen actualmente seleccionada para la receta (${effectivePreviewCandidateIndex + 1} de ${candidates.length}).`
+        : `Estas previsualizando la alternativa ${effectivePreviewCandidateIndex + 1} de ${candidates.length}. Puedes seleccionarla o seguir navegando.`
     : imageRetryLabel && recipe.image_lookup_status === "upstream_error"
       ? `La resolucion de imagen encontro un error temporal. Conviene esperar ${imageRetryLabel} antes de reintentar.`
       : getRecipeImageReason(recipe);
-  const detailImageSourceUrl = imageResolutionPending ? null : getRecipeImageSourceUrl(recipe);
+  const detailImageSourceUrl = imageResolutionPending ? null : previewCandidate?.image_source_url || getRecipeImageSourceUrl(recipe);
   const imageCandidateSummary =
-    recipe.image_candidate_count && recipe.image_candidate_count > 0
-      ? `Alternativa ${recipe.image_candidate_position ?? 0} de ${recipe.image_candidate_count}`
+    hasImageCandidates && effectivePreviewCandidateIndex !== null
+      ? `Alternativa ${effectivePreviewCandidateIndex + 1} de ${candidates.length}`
       : null;
-  const canDiscardImage = imageResolutionEnabled && !isEditing && noMoreImageAlternatives;
+  const canDiscardImage = imageResolutionEnabled && !isEditing && (hasImageCandidates || Boolean(getRecipeImage(recipe)));
+  const canGoToPreviousCandidate = hasImageCandidates && effectivePreviewCandidateIndex !== null && effectivePreviewCandidateIndex > 0;
+  const canGoToNextCandidate =
+    hasImageCandidates && effectivePreviewCandidateIndex !== null && effectivePreviewCandidateIndex < candidates.length - 1;
+  const canPersistPreviewCandidate =
+    hasImageCandidates &&
+    effectivePreviewCandidateIndex !== null &&
+    (persistedCandidateIndex !== effectivePreviewCandidateIndex || !getRecipeImage(recipe));
+  const discardImageLabel = getRecipeImage(recipe) ? "Quitar foto" : "Dejar sin foto";
 
   function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
     setDraft((current) =>
@@ -211,16 +263,22 @@ export function RecipeDetailView({
     }
   }
 
+  async function selectPreviewCandidate() {
+    if (!recipe || effectivePreviewCandidateIndex === null) return;
+    const updated = await onUpdateRecipe(recipe.id, {
+      image_candidate_index: effectivePreviewCandidateIndex,
+    });
+    if (updated) {
+      setDraft(buildRecipeEditForm(updated));
+      setPreviewCandidateIndex(
+        typeof updated.image_candidate_index === "number" ? updated.image_candidate_index : effectivePreviewCandidateIndex,
+      );
+    }
+  }
+
   async function discardRecipeImage() {
     if (!recipe) return;
-    const updated = await onUpdateRecipe(recipe.id, {
-      image_url: null,
-      image_source_url: null,
-      image_alt_text: null,
-      image_lookup_status: "attempts_exhausted",
-      image_lookup_reason:
-        "Has descartado todas las alternativas de imagen disponibles para esta receta. Se mostrara un placeholder.",
-    });
+    const updated = await onUpdateRecipe(recipe.id, { image_candidate_index: null });
     if (updated) {
       setDraft(buildRecipeEditForm(updated));
     }
@@ -382,7 +440,7 @@ export function RecipeDetailView({
         <div className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-line bg-white shadow-soft">
             <div className="h-80 w-full">
-              <RecipeVisualSurface loading={imageResolutionPending} recipe={recipe} />
+              <RecipeVisualSurface loading={imageResolutionPending} recipe={previewRecipe} />
             </div>
           </div>
 
@@ -423,6 +481,39 @@ export function RecipeDetailView({
                 {imageCandidateSummary ? (
                   <span className="text-xs font-semibold uppercase text-ink/45">{imageCandidateSummary}</span>
                 ) : null}
+                {hasImageCandidates ? (
+                  <>
+                    <button
+                      className="rounded-lg border border-line px-3 py-2 text-xs font-semibold text-ink/70 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={imageResolutionPending || loading || !canGoToPreviousCandidate}
+                      onClick={() => setPreviewCandidateIndex((current) => (current === null ? 0 : Math.max(current - 1, 0)))}
+                      type="button"
+                    >
+                      Anterior
+                    </button>
+                    <button
+                      className="rounded-lg border border-line px-3 py-2 text-xs font-semibold text-ink/70 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={imageResolutionPending || loading || !canGoToNextCandidate}
+                      onClick={() =>
+                        setPreviewCandidateIndex((current) => {
+                          if (current === null) return 0;
+                          return Math.min(current + 1, candidates.length - 1);
+                        })
+                      }
+                      type="button"
+                    >
+                      Siguiente
+                    </button>
+                    <button
+                      className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={imageResolutionPending || loading || !canPersistPreviewCandidate}
+                      onClick={() => void selectPreviewCandidate()}
+                      type="button"
+                    >
+                      {persistedCandidateIndex === effectivePreviewCandidateIndex && getRecipeImage(recipe) ? "Imagen activa" : "Usar esta imagen"}
+                    </button>
+                  </>
+                ) : null}
                 {canResolveImage ? (
                   <button
                     className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
@@ -440,12 +531,35 @@ export function RecipeDetailView({
                     onClick={() => void discardRecipeImage()}
                     type="button"
                   >
-                    Dejar sin foto
+                    {discardImageLabel}
                   </button>
                 ) : null}
               </div>
             </div>
             <p className="mt-4 text-sm leading-6 text-ink/75">{detailImageCaption}</p>
+            {hasImageCandidates ? (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {candidates.map((candidate, index) => {
+                  const isPreviewActive = effectivePreviewCandidateIndex === index;
+                  const isPersisted = persistedCandidateIndex === index && Boolean(getRecipeImage(recipe));
+                  return (
+                    <button
+                      className={`relative h-14 w-14 overflow-hidden rounded-lg border ${isPreviewActive ? "border-leaf shadow-soft" : "border-line opacity-85 hover:opacity-100"} ${isPersisted ? "ring-2 ring-leaf/35" : ""}`}
+                      key={`${candidate.image_url}-${index}`}
+                      onClick={() => setPreviewCandidateIndex(index)}
+                      title={`Alternativa ${index + 1}`}
+                      type="button"
+                    >
+                      <img
+                        alt={candidate.image_alt_text?.trim() || `Alternativa ${index + 1} de ${recipe.title}`}
+                        className="h-full w-full object-cover"
+                        src={candidate.image_url}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
             <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Texto alternativo</p>
             <p className="mt-1 text-sm leading-6 text-ink/70">{detailImageAltText}</p>
             {detailImageSourceUrl ? (
