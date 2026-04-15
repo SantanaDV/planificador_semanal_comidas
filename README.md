@@ -703,4 +703,3 @@ La receta ahora expone `image_candidates` e `image_candidate_index`, el detalle 
 - Mejor control de coste, cuota y trazabilidad de prompts.
 - Preferencias por cantidad de personas en la familia.
 - Recetas con resta automatica de ingredientes en la nevera usados.
--
