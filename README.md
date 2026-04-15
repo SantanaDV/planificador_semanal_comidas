@@ -32,43 +32,133 @@ Aplicacion web para crear menus semanales a partir de ingredientes disponibles, 
 - Python 3.12 si ejecutas el backend sin Docker.
 - Clave de Gemini API para probar generacion real con `gemini-2.5-flash-lite`.
 
-## Ejecucion local con Docker
+## Arranque rapido con Docker
 
-1. Copia las variables de entorno:
+Este es el flujo recomendado para levantar el proyecto y comprobar que la integracion con Gemini esta bien configurada.
+
+### 1. Preparar variables de entorno
+
+WSL / Linux / macOS:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Crea una clave en Google AI Studio:
+Windows PowerShell:
 
-- Entra en https://aistudio.google.com/apikey.
-- Crea o selecciona un proyecto.
-- Genera una API key para Gemini.
+```powershell
+Copy-Item .env.example .env
+```
 
-3. Abre `.env` y pega tu clave localmente:
+### 2. Crear una clave Gemini API en Google AI Studio
+
+Paso a paso contrastado con la documentacion oficial de Google AI for Developers:
+
+1. Entra en Google AI Studio: https://aistudio.google.com/
+2. Inicia sesion con tu cuenta de Google.
+3. Si es tu primera vez, acepta los terminos de servicio cuando te los pida AI Studio.
+4. Abre la pagina de claves: https://aistudio.google.com/apikey
+5. Si AI Studio ya te muestra un proyecto y una clave, puedes usar esa clave.
+6. Si no ves un proyecto disponible:
+   - abre `Dashboard`
+   - entra en `Projects`
+   - si eres usuario nuevo, AI Studio puede haberte creado un proyecto por defecto automaticamente
+   - si ya tenias proyectos de Google Cloud, usa `Import projects` y busca tu proyecto por nombre o `project ID`
+7. Vuelve a `API Keys` y crea una clave en el proyecto elegido.
+8. Copia la clave y guardala localmente. No se vuelve a publicar desde este repositorio.
+
+Casos reales a tener en cuenta:
+
+- Si el boton de crear clave aparece deshabilitado o ves un mensaje del tipo `You do not have permission to create a key in this project`, el problema no es del proyecto: faltan permisos en Google Cloud sobre ese proyecto.
+- Si no tienes permisos sobre un proyecto corporativo u organizacional, la salida mas simple para esta prueba es crear o usar un proyecto personal que controles.
+- Google AI Studio muestra y gestiona las claves desde su propia pagina de `API Keys`, pero para administracion avanzada o restricciones puedes ir despues a Google Cloud Console.
+
+### 3. Pegar la clave en `.env`
+
+Abre `.env` y deja, como minimo:
 
 ```bash
-GEMINI_API_KEY=tu_clave
+GEMINI_API_KEY=tu_clave_real_aqui
 GEMINI_MODEL=gemini-2.5-flash-lite
 GEMINI_ENABLE_GOOGLE_SEARCH=true
 ```
 
 No subas `.env` al repositorio. La clave se usa solo en el backend mediante la variable `GEMINI_API_KEY`; el frontend no la recibe.
 
-4. Levanta la aplicacion:
+### 4. Levantar la aplicacion
 
 ```bash
 docker compose up --build
 ```
 
-Docker arranca el frontend con `next start` sobre una build de produccion. Para desarrollo con recarga en caliente usa la ejecucion sin Docker.
+Docker arranca:
 
-5. Abre:
+- PostgreSQL en `localhost:5432`
+- backend FastAPI en `localhost:8000`
+- frontend Next.js en `localhost:3000`
+
+El frontend se ejecuta con `next start` sobre una build de produccion. Si quieres recarga en caliente, usa la ejecucion sin Docker.
+
+### 5. Verificar que todo ha arrancado
+
+```bash
+curl http://localhost:8000/health
+```
+
+Respuesta esperada:
+
+```json
+{"status":"ok"}
+```
+
+### 6. Verificar si Gemini ha quedado configurado
+
+```bash
+curl http://localhost:8000/ai/status
+```
+
+Si la clave esta bien cargada, deberias ver algo parecido a:
+
+```json
+{
+  "provider": "gemini",
+  "model": "gemini-2.5-flash-lite",
+  "configured": true,
+  "mode": "ai"
+}
+```
+
+Si `configured` sale `false`, revisa:
+
+- que la clave esta realmente escrita en `.env`
+- que has levantado Docker despues de editar `.env`
+- que no hay espacios o comillas sobrantes en `GEMINI_API_KEY`
+
+### 7. Abrir la app
 
 - Frontend: http://localhost:3000
 - API docs: http://localhost:8000/docs
 - Healthcheck: http://localhost:8000/health
+
+### 8. Comprobar el flujo real
+
+1. Entra en `Ingredientes`.
+2. Si no quieres cargar ingredientes a mano, usa el flujo de ingredientes de prueba desde la UI cuando el generador te lo ofrezca.
+3. Pulsa `Generar menu semanal`.
+4. Si Gemini esta bien configurado y con cuota disponible, el backend intentara generar el menu con IA real.
+5. Si no hay clave valida, la app te avisara antes y podras continuar con modo demo local.
+
+## Creacion de la clave Gemini API: resumen corto
+
+Si solo quieres el minimo imprescindible:
+
+1. Ve a https://aistudio.google.com/apikey
+2. Inicia sesion
+3. Crea o importa un proyecto si hace falta
+4. Genera una API key
+5. Copiala en `.env` como `GEMINI_API_KEY=...`
+6. Reinicia `docker compose up --build`
+7. Comprueba `curl http://localhost:8000/ai/status`
 
 Sin una `GEMINI_API_KEY` valida, el menu se genera con fallback local controlado. Esto es intencional para que la entrega sea ejecutable aunque no haya cuota o conexion con Gemini, pero para evaluar la integracion IA real configura tu propia clave. Si no hay ingredientes en la nevera, la app no genera un menu con datos inventados: muestra un estado vacio y permite cargar ingredientes de prueba en PostgreSQL desde la UI.
 
@@ -100,15 +190,57 @@ npm run dev
 
 ## Variables de entorno
 
-| Variable                | Uso                                                         | Valor por defecto            |
-| ----------------------- | ----------------------------------------------------------- | ---------------------------- |
-| `GEMINI_API_KEY`      | Clave local de Gemini API. Si falta, se usa fallback local. | vacio                        |
-| `GEMINI_MODEL`        | Modelo usado para `generateContent`.                      | `gemini-2.5-flash-lite`    |
-| `GEMINI_ENABLE_GOOGLE_SEARCH` | Activa la busqueda web de Gemini para intentar resolver imagenes reales. | `true` |
-| `DATABASE_URL`        | Conexion SQLAlchemy del backend.                            | SQLite local fuera de Docker |
-| `NEXT_PUBLIC_API_URL` | URL de la API para el navegador.                            | `http://localhost:8000`    |
+| Variable                        | Uso                                                                      | Valor por defecto            |
+| ------------------------------- | ------------------------------------------------------------------------ | ---------------------------- |
+| `GEMINI_API_KEY`              | Clave local de Gemini API. Si falta, se usa fallback local.              | vacio                        |
+| `GEMINI_MODEL`                | Modelo usado para `generateContent`.                                   | `gemini-2.5-flash-lite`    |
+| `GEMINI_ENABLE_GOOGLE_SEARCH` | Activa la busqueda web de Gemini para intentar resolver imagenes reales. | `true`                     |
+| `DATABASE_URL`                | Conexion SQLAlchemy del backend.                                         | SQLite local fuera de Docker |
+| `NEXT_PUBLIC_API_URL`         | URL de la API para el navegador.                                         | `http://localhost:8000`    |
 
 La clave no debe escribirse en codigo ni commitearse. Google recomienda tratarla como una contrasena, no exponerla en cliente y preferir llamadas server-side. Por eso la app llama a Gemini desde FastAPI y solo publica `.env.example` con placeholders.
+
+## Problemas habituales al crear o usar la clave Gemini
+
+### `configured: false` en `/ai/status`
+
+Suele deberse a uno de estos casos:
+
+- `.env` no existe o no se copio desde `.env.example`
+- la clave no se pego realmente en `GEMINI_API_KEY`
+- editaste `.env` despues de levantar Docker y no reconstruiste
+- hay espacios, comillas o saltos de linea extra en la clave
+
+Solucion:
+
+```bash
+docker compose up --build
+curl http://localhost:8000/ai/status
+```
+
+### No puedes crear la clave en Google AI Studio
+
+Segun la documentacion oficial de Google, suele deberse a permisos insuficientes sobre el proyecto de Google Cloud asociado.
+
+Soluciones practicas para esta prueba:
+
+- usar un proyecto personal
+- importar manualmente el proyecto correcto desde `Dashboard > Projects > Import projects`
+- pedir permisos si es un proyecto compartido u organizacional
+
+### La clave existe, pero el modelo devuelve errores temporales
+
+Puede ocurrir por:
+
+- cuota o rate limit del plan disponible
+- saturacion temporal del proveedor
+- clave bloqueada o filtrada
+
+La app registra estos casos en `system_logs` y distingue entre error, saturacion y fallback. Si necesitas revisar trazas:
+
+```bash
+curl "http://localhost:8000/logs?module=ai&limit=20"
+```
 
 ## Datos de prueba y fallback
 
@@ -122,10 +254,11 @@ La clave no debe escribirse en codigo ni commitearse. Google recomienda tratarla
 - Los ingredientes excluidos se seleccionan desde los ingredientes existentes en la nevera. Si tras aplicar exclusiones quedan menos de 5 ingredientes disponibles, la app avisa antes de llamar a Gemini o al fallback.
 - El backend pasa como contexto recetas guardadas compatibles y prioriza las favoritas compatibles sin forzarlas si no encajan.
 - La generacion semanal prioriza estabilidad: Gemini construye el menu y las recetas sin intentar resolver imagenes para los 14 platos en la misma llamada.
-- La resolucion de imagenes reales se hace bajo demanda desde el detalle de receta, usando `google_search` solo para esa receta concreta.
+- La resolucion de imagenes reales se hace bajo demanda al entrar en Recetas para un lote pequeno de recetas nuevas y tambien desde el detalle de receta cuando hace falta reintentar.
 - Con `gemini-2.5-flash-lite`, el uso de tools no se puede combinar con `responseMimeType=application/json`, asi que el backend usa JSON estricto para la generacion del menu y parseo controlado por prompt en la resolucion de imagen.
-- La IA puede devolver `image_url`, `image_source_url`, `image_alt_text`, `image_lookup_status` e `image_lookup_reason` cuando se resuelve una imagen bajo demanda.
+- La IA prioriza `image_source_url` como pagina fuente del plato. El backend intenta extraer una imagen real desde metadatos estandar de esa pagina (`og:image`, `twitter:image`, JSON-LD/schema.org `) y solo usa `image_url` directa si pasa validacion.
 - El backend valida la URL de imagen con una comprobacion HTTP minima y degrada a `image_url = null` cualquier valor sospechoso, no accesible o que no responda como imagen real.
+- Los estados de resolucion distinguen entre `found`, `invalid`, `not_found`, `rate_limited` y `upstream_error`.
 - Si la IA no encuentra una imagen fiable, la receta sigue siendo valida y el frontend muestra un placeholder limpio con opcion de reintento.
 - El fallback local vive separado en `backend/app/demo_fallback.py` y solo se usa cuando Gemini no esta configurado o cuando la llamada externa falla.
 - Si hay suficientes ingredientes pero no hay clave valida de Gemini, la app avisa antes de generar y permite continuar con modo demo local.
@@ -162,7 +295,14 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 6. Sustituye un plato para mostrar el flujo de regeneracion.
 7. Repite una receta guardada desde el selector.
 8. Filtra el recetario, abre una tarjeta, crea una receta manual, marca una favorita y edita raciones, dificultad, foto, ingredientes o pasos.
-9. Abre el detalle de una receta generada para que la app intente resolver una imagen real solo para esa receta, sin bloquear la generacion semanal.
+9. Entra en Recetas para que la app intente resolver imagenes de nuevas recetas en segundo plano. Si una sigue sin foto, abre su detalle y reintenta desde ahi sin bloquear la generacion semanal.
+
+## Referencias oficiales usadas para esta configuracion
+
+- Google AI Studio / Gemini API: https://ai.google.dev/aistudio
+- Gestion de claves Gemini API: https://ai.google.dev/gemini-api/docs/api-key
+- Referencia API Gemini: https://ai.google.dev/api
+- Troubleshooting oficial Gemini API: https://ai.google.dev/gemini-api/docs/troubleshooting
 
 ## Guion sugerido para video de 3 minutos
 
@@ -389,13 +529,16 @@ Permite que la propia llamada a Gemini intente resolver una imagen real del plat
 **Qué se ajustó después:**
 Fue necesario separar la resolucion de imagenes de la generacion semanal: con `gemini-2.5-flash-lite`, buscar 14 recetas con imagen en la misma llamada elevaba el riesgo de `ReadTimeout`, asi que el menu se genera primero y la imagen se resuelve bajo demanda en el detalle.
 
+
+# Estructura del video y presentación
+
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
 - 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker, Gemini con fallback.
 - 0:55-2:10: demo: ingredientes, preferencias, generar menu, sustituir plato, repetir receta y recetario con detalle editable.
 - 2:10-2:35: uso de IA: Antigravity/Codex para desarrollo, Figma AI para explorar interfaz y Gemini para generar menus con ingredientes, preferencias e historial.
 - 2:35-3:00: mejoras: login real, nutricion, tests E2E, migraciones y lista de compra.
 
-## Roadmap despues del MVP
+Roadmap despues del MVP
 
 - Autenticacion real y perfiles de usuario.
 - Migraciones con Alembic.
