@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Ingredient = {
   id: string;
@@ -350,19 +350,19 @@ function getRecipeImageReason(recipe: Recipe) {
   const legacyFallbackReason = "El modo demo local no busca imagenes reales en internet.";
 
   if (getRecipeImage(recipe)) {
-    return normalizedReason || "La receta ya cuenta con una imagen disponible.";
+    return normalizedReason || "La receta ya cuenta con una imagen real validada.";
   }
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) {
     return "Todavia no se ha intentado resolver una imagen real para esta receta.";
   }
   if (recipe.image_lookup_status === "rate_limited") {
-    return normalizedReason || "La resolucion de imagen se ha pausado por saturacion temporal del proveedor.";
+    return normalizedReason || "La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini.";
   }
   if (recipe.image_lookup_status === "upstream_error") {
-    return normalizedReason || "No se pudo consultar la fuente externa de imagen en este momento.";
+    return normalizedReason || "La resolucion de imagen ha encontrado un error temporal del proveedor o de la pagina fuente.";
   }
   if (recipe.image_lookup_status === "invalid") {
-    return normalizedReason || "Se encontro una referencia, pero no se pudo validar como imagen directa.";
+    return normalizedReason || "Se encontro una referencia, pero ninguna imagen asociada se pudo validar.";
   }
   if (normalizedReason === legacyFallbackReason) {
     return "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.";
@@ -376,8 +376,8 @@ function getRecipeImageReason(recipe: Recipe) {
 function getRecipeImageStatus(recipe: Recipe) {
   if (getRecipeImage(recipe)) return "Imagen encontrada";
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Imagen pendiente";
-  if (recipe.image_lookup_status === "rate_limited") return "Pausada por saturacion";
-  if (recipe.image_lookup_status === "upstream_error") return "Error temporal";
+  if (recipe.image_lookup_status === "rate_limited") return "Resolucion pausada";
+  if (recipe.image_lookup_status === "upstream_error") return "Error temporal de resolucion";
   if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
   return "Sin imagen disponible";
 }
@@ -390,6 +390,21 @@ function parseIsoDate(value?: string | null) {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getRetryAfterSeconds(value?: string | null, nowMs = Date.now()) {
+  const retryAfter = parseIsoDate(value);
+  if (!retryAfter) return null;
+  const diffMs = retryAfter.getTime() - nowMs;
+  if (diffMs <= 0) return null;
+  return Math.ceil(diffMs / 1000);
+}
+
+function formatRetryCountdown(totalSeconds: number) {
+  if (totalSeconds <= 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
 
 function canAutoResolveRecipeImage(recipe: Recipe) {
@@ -698,6 +713,7 @@ export default function Home() {
     attemptedCount: 0,
     remainingCount: 0,
   });
+  const imageResolutionRequestsInFlight = useRef<Set<string>>(new Set());
   const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings, ingredients), [ingredients, preferenceSettings]);
   const usableIngredients = useMemo(
     () => ingredients.filter((ingredient) => !preferenceSettings.excludedIngredientIds.includes(ingredient.id)),
@@ -1017,9 +1033,15 @@ export default function Home() {
         body: JSON.stringify({ recipe_ids: recipeIds ?? [], limit: 4, force: false }),
       });
       mergeResolvedRecipes(data.updated_recipes);
+      const uiMessage =
+        data.stopped_reason === "rate_limited"
+          ? `La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini. ${data.message}`
+          : data.stopped_reason === "upstream_error"
+            ? `La resolucion de imagenes encontro un error temporal del proveedor o de la pagina fuente. ${data.message}`
+            : data.message;
       setRecipeImageBatchFeedback({
         phase: data.stopped_reason === "rate_limited" ? "rate_limited" : data.stopped_reason === "upstream_error" ? "error" : "success",
-        message: data.message,
+        message: uiMessage,
         cooldownSeconds: data.stopped_reason === "rate_limited" ? parseCooldownSeconds(data.message) : null,
         attemptedCount: data.attempted_count,
         remainingCount: data.remaining_pending_count,
@@ -1040,6 +1062,10 @@ export default function Home() {
   }
 
   async function resolveRecipeImage(recipeId: string, force = false) {
+    if (imageResolutionRequestsInFlight.current.has(recipeId)) {
+      return null;
+    }
+    imageResolutionRequestsInFlight.current.add(recipeId);
     setResolvingRecipeImageId(recipeId);
     try {
       const data = await api<Recipe>(`/recipes/${recipeId}/resolve-image${force ? "?force=true" : ""}`, {
@@ -1047,7 +1073,9 @@ export default function Home() {
       });
       mergeResolvedRecipes([data]);
       setSelectedRecipeId(data.id);
-      setMessage(data.image_url ? "Imagen real resuelta para la receta." : getRecipeImageReason(data));
+      if (force) {
+        setMessage(data.image_url ? "Imagen real resuelta para la receta." : getRecipeImageReason(data));
+      }
       reportClientLog("info", "Resolucion de imagen lanzada desde frontend", {
         action: "resolve_recipe_image",
         recipe_id: data.id,
@@ -1057,10 +1085,13 @@ export default function Home() {
       });
       return data;
     } catch (error) {
-      setMessage(getErrorMessage(error, "Error al resolver la imagen de la receta."));
+      if (force) {
+        setMessage(getErrorMessage(error, "Error al resolver la imagen de la receta."));
+      }
       reportClientLog("error", "Error resolviendo imagen desde frontend", { action: "resolve_recipe_image", recipe_id: recipeId }, error);
       return null;
     } finally {
+      imageResolutionRequestsInFlight.current.delete(recipeId);
       setResolvingRecipeImageId((current) => (current === recipeId ? null : current));
     }
   }
@@ -2963,6 +2994,7 @@ function RecipeDetailView({
   const [localError, setLocalError] = useState("");
   const [autoResolveRequestedFor, setAutoResolveRequestedFor] = useState<string | null>(null);
   const [draft, setDraft] = useState<RecipeEditForm | null>(() => (recipe ? buildRecipeEditForm(recipe) : null));
+  const [imageStatusNow, setImageStatusNow] = useState(() => Date.now());
 
   useEffect(() => {
     setIsEditing(false);
@@ -2982,6 +3014,19 @@ function RecipeDetailView({
     void onResolveRecipeImage(recipe.id);
   }, [aiEnabled, autoResolveRequestedFor, imageResolutionPending, onResolveRecipeImage, recipe]);
 
+  const imageRetryCountdown =
+    !imageResolutionPending && (recipe?.image_lookup_status === "rate_limited" || recipe?.image_lookup_status === "upstream_error")
+      ? getRetryAfterSeconds(recipe.image_lookup_retry_after, imageStatusNow)
+      : null;
+
+  useEffect(() => {
+    if (!imageRetryCountdown) return;
+    const timer = window.setInterval(() => {
+      setImageStatusNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [imageRetryCountdown]);
+
   if (!recipe || !draft) {
     return (
       <section className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
@@ -2997,8 +3042,11 @@ function RecipeDetailView({
   const servings = getRecipeServings(recipe);
   const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
   const canResolveImage = aiEnabled && !getRecipeImage(recipe) && !isEditing;
+  const imageRetryLabel = imageRetryCountdown ? formatRetryCountdown(imageRetryCountdown) : null;
   const imageActionLabel =
-    recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found" || recipe.image_lookup_status === "upstream_error" || recipe.image_lookup_status === "rate_limited"
+    imageRetryLabel
+      ? `Reintentar en ${imageRetryLabel}`
+      : recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found" || recipe.image_lookup_status === "upstream_error" || recipe.image_lookup_status === "rate_limited"
       ? "Reintentar imagen real"
       : "Buscar imagen real";
   const detailImageStatus = imageResolutionPending ? "Buscando imagen real" : getRecipeImageStatus(recipe);
@@ -3010,6 +3058,10 @@ function RecipeDetailView({
     : getRecipeAltText(recipe);
   const detailImageReason = imageResolutionPending
     ? "Consultando la pagina fuente propuesta por la IA y validando que la imagen sea real y reutilizable."
+    : imageRetryLabel && recipe.image_lookup_status === "rate_limited"
+      ? `La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini. Reintento disponible en ${imageRetryLabel}.`
+      : imageRetryLabel && recipe.image_lookup_status === "upstream_error"
+        ? `La resolucion de imagen encontro un error temporal. Conviene esperar ${imageRetryLabel} antes de reintentar.`
     : getRecipeImageReason(recipe);
   const detailImageSourceUrl = imageResolutionPending ? null : getRecipeImageSourceUrl(recipe);
 
@@ -3286,7 +3338,7 @@ function RecipeDetailView({
                 {canResolveImage ? (
                   <button
                     className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={imageResolutionPending || loading}
+                    disabled={imageResolutionPending || loading || Boolean(imageRetryLabel)}
                     onClick={() => void onResolveRecipeImage(recipe.id, true)}
                     type="button"
                   >
