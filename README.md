@@ -529,6 +529,74 @@ Permite que la propia llamada a Gemini intente resolver una imagen real del plat
 **Qué se ajustó después:**
 Fue necesario separar la resolucion de imagenes de la generacion semanal: con `gemini-2.5-flash-lite`, buscar 14 recetas con imagen en la misma llamada elevaba el riesgo de `ReadTimeout`, asi que el menu se genera primero y la imagen se resuelve bajo demanda en el detalle.
 
+---
+
+## 9. Resolucion de imagenes desde pagina fuente
+
+**Herramienta:** Codex / Gemini
+**Objetivo:** Dejar de depender de una `image_url` directa sugerida por Gemini y pasar a un flujo mas robusto basado en pagina fuente.
+
+**Prompt usado:**
+
+> Quiero la solucion arquitectonica y funcional mas robusta para la resolucion de imagenes en este MVP. Gemini debe ayudar a encontrar la pagina fuente del plato (`image_source_url`) y el backend debe extraer la imagen real desde metadatos estandar (`og:image`, `twitter:image`, `schema.org image`). La resolucion debe seguir siendo bajo demanda, no parte obligatoria de la generacion semanal, y debe distinguir entre `found`, `invalid`, `not_found`, `rate_limited` y `upstream_error`.
+
+**Por qué funcionó:**
+Cambió el problema desde “que Gemini adivine la URL final” a un flujo mucho mas estable: Gemini encuentra la pagina y el backend valida la imagen real.
+
+**Qué se ajustó después:**
+Se añadió persistencia de `image_lookup_attempted_at` y `image_lookup_retry_after`, junto con resolucion en lote pequeña al entrar en Recetas y reintento manual en el detalle.
+
+---
+
+## 10. Robustez del generador semanal con IA
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar que la generacion semanal caiga a `fallback-local` por respuestas parcialmente invalidas del modelo.
+
+**Prompt usado:**
+
+> Quiero robustecer la generacion semanal con IA: registrar por que se rechaza un payload parseable, hacer un retry controlado antes del fallback, intentar reparar slots invalidos y dejar trazabilidad clara de los casos `rate_limited`, `upstream_error`, `invalid` o `not_found`.
+
+**Por qué funcionó:**
+Permitió diagnosticar problemas reales del flujo, reducir fallback silencioso y dejar logs defendibles en `system_logs` sobre validacion, retry y rechazo de Gemini.
+
+**Qué se ajustó después:**
+Se endurecieron despues las reglas de despensa basica y se priorizo devolver error controlado ante `429` o saturacion temporal, en lugar de persistir menus de fallback engañosos.
+
+---
+
+## 11. Reglas domesticas de despensa y UX de estados
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Hacer el producto mas realista en cocina domestica y mejorar los estados visuales de espera, rate limit y resolucion de imagen.
+
+**Prompt usado:**
+
+> Ajusta la logica del generador para aceptar una despensa basica limitada sin vaciar el valor del producto, trata aceite de oliva, sal, pimienta y agua como apoyo libre, evita invalidaciones artificiales y revisa la UX para que la generacion semanal y la resolucion de imagen siempre muestren carga, cooldown, error o exito de forma clara y sin glitches visuales.
+
+**Por qué funcionó:**
+Mejoró dos capas a la vez: las recetas rechazaban menos casos razonables y la interfaz dejó de dar sensacion de bloqueo silencioso o mezcla de estados contradictorios.
+
+**Qué se ajustó después:**
+La grid de recetas se limpió visualmente para quitar badges tecnicos de la superficie principal y dejar la trazabilidad tecnica en el detalle de receta y en logs.
+
+---
+
+## 12. Correccion del flujo de reintento de imagen
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Eliminar glitches visuales y reintentos duplicados cuando Gemini se satura durante la resolucion de imagenes.
+
+**Prompt usado:**
+
+> Revisa el flujo de reintento de imagen en el detalle de receta cuando Gemini devuelve `rate_limited` o `upstream_error`. Quiero una maquina de estados clara, sin mezclar “Buscando...” con errores viejos, con boton deshabilitado durante la espera y sin duplicar llamadas por re-render o cambios de estado en React.
+
+**Por qué funcionó:**
+Obligó a separar correctamente el estado de carga del estado previo, a respetar `retry_after` y a poner una guarda local por `recipe_id` para evitar tormentas de peticiones en el frontend.
+
+**Qué se ajustó después:**
+El copy de la UI se hizo más específico: ahora habla de “resolucion de imagenes” y de saturacion de Gemini, en lugar de mostrar un error genérico que parecía romper la receta completa.
+
 
 # Estructura del video y presentación
 
