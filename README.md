@@ -657,6 +657,23 @@ Se mantuvo el descarte de ruido claro (`logo`, `icon`, `avatar`, `placeholder`),
 
 ---
 
+## 19. Refactorizacion tactica del frontend antes de la entrega
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Reducir el tamaño y la complejidad de `frontend/app/page.tsx` sin abrir una reescritura ni cambiar el comportamiento visible de la app.
+
+**Prompt usado:**
+
+> Quiero una refactorizacion tactica del frontend: extrae solo los bloques visuales grandes y cohesionados que de verdad bajen el peso de `page.tsx`, manteniendo la pagina principal como contenedor de estado y composicion.
+
+**Por qué funcionó:**
+Fijo bien el alcance. En lugar de mover medio frontend, la refactorizacion se centro en componentes con responsabilidad clara (`RecipeDetailView`, `RecipeModal`, `IngredientModal`, banners y superficies visuales) y en un modulo compartido de tipos y helpers.
+
+**Qué se ajustó después:**
+`page.tsx` paso de 3778 a 2101 lineas manteniendo la misma UX visible, el mismo contrato con backend y la misma orquestacion principal dentro de `Home`.
+
+---
+
 # Roadmap despues del MVP
 
 - Autenticacion real mediante JSON WEB TOKEN y perfiles de usuario.
