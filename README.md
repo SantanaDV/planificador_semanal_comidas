@@ -2,6 +2,12 @@
 
 Aplicacion web para crear menus semanales a partir de ingredientes disponibles, preferencias e historial de recetas. El MVP usa Next.js, FastAPI, PostgreSQL, Docker Compose y Gemini configurable. Para probar IA real necesitas tu propia clave de Gemini; si no la configuras, el backend usa un fallback local para que la demo siga funcionando.
 
+## Nota de decision para la entrega
+
+Durante el desarrollo se exploro una integracion local con Ollama para que la generacion textual del menu no dependiera de un servicio externo. El experimento se completo a nivel arquitectonico, pero no se adopto como camino principal para esta entrega porque la generacion semanal completa no alcanzo un nivel suficientemente estable ni una latencia razonable en CPU para la demo final.
+
+La entrega final prioriza por tanto la version mas estable y defendible del producto. El trabajo experimental queda preservado en una rama separada del repositorio: `experiment/local-ollama-menu`.
+
 ## Entregables de la prueba
 
 - Repositorio ejecutable con instrucciones locales.
@@ -597,14 +603,31 @@ Obligó a separar correctamente el estado de carga del estado previo, a respetar
 **Qué se ajustó después:**
 El copy de la UI se hizo más específico: ahora habla de “resolucion de imagenes” y de saturacion de Gemini, en lugar de mostrar un error genérico que parecía romper la receta completa.
 
+---
+
+## 13. Evaluacion de Ollama local para la generacion textual
+
+**Herramienta:** Codex / Ollama
+**Objetivo:** Evaluar si un proveedor local de texto podia convertirse en el camino principal para generar el menu semanal y las sustituciones sin depender de servicios externos.
+
+**Prompt usado:**
+
+> Separa la arquitectura para soportar un proveedor local de texto y valida si un flujo con Ollama en CPU puede sostener la generacion semanal completa con suficiente estabilidad y latencia razonable para la prueba tecnica.
+
+**Por qué funcionó:**
+Permitió comprobar con datos reales que el desacoplamiento arquitectonico era correcto, pero tambien que la generacion semanal completa con modelo pequeno en CPU seguia siendo demasiado fragil para esta entrega.
+
+**Qué se ajustó después:**
+La decision final fue no mezclar ese experimento con la entrega principal. La rama `main` se mantiene en la via mas estable y el experimento local con Ollama queda preservado en `experiment/local-ollama-menu` para retomarlo mas adelante.
+
 
 # Estructura del video y presentación
 
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
-- 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker, Gemini con fallback.
+- 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker y generacion semanal estable con Gemini configurable y fallback.
 - 0:55-2:10: demo: ingredientes, preferencias, generar menu, sustituir plato, repetir receta y recetario con detalle editable.
 - 2:10-2:35: uso de IA: Antigravity/Codex para desarrollo, Figma AI para explorar interfaz y Gemini para generar menus con ingredientes, preferencias e historial.
-- 2:35-3:00: mejoras: login real, nutricion, tests E2E, migraciones y lista de compra.
+- 2:35-3:00: mejoras: login real, proveedor local de IA mas maduro, nutricion, tests E2E, migraciones y lista de compra.
 
 Roadmap despues del MVP
 
