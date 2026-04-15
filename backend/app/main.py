@@ -142,7 +142,7 @@ def ai_status() -> AiStatusOut:
         configured=configured,
         mode="ai" if configured else "fallback",
         message=(
-            "Gemini configurado. Se reserva para la generacion del menu semanal; las imagenes de recetas se resuelven por busqueda HTTP bajo demanda."
+            "Gemini configurado para la generacion del menu semanal"
             if configured
             else "Gemini no esta configurado. La generacion usara fallback local de demo."
         ),
@@ -316,6 +316,9 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
     if not changes:
         return _recipe_to_dict(recipe)
 
+    candidate_index_requested = "image_candidate_index" in changes
+    requested_candidate_index = changes.pop("image_candidate_index", None) if candidate_index_requested else None
+
     for field, value in changes.items():
         if isinstance(value, list):
             value = [item.strip() for item in value if item.strip()]
@@ -327,7 +330,36 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
                 value = _normalize_image_lookup_status(value, changes.get("image_url", recipe.image_url))
         setattr(recipe, field, value)
 
-    if any(field in changes for field in {"image_url", "image_source_url", "image_alt_text", "image_lookup_status"}):
+    if candidate_index_requested:
+        candidates = _normalize_image_candidates(recipe.image_candidates)
+        if requested_candidate_index is None:
+            recipe.image_candidate_index = None
+            recipe.image_url = None
+            recipe.image_source_url = None
+            recipe.image_alt_text = None
+            recipe.image_lookup_status = "found" if candidates else "pending"
+            recipe.image_lookup_reason = (
+                "Has dejado la receta sin foto. Puedes volver a cualquiera de las alternativas guardadas desde el detalle."
+                if candidates
+                else "La receta no tiene una foto seleccionada."
+            )
+            recipe.image_lookup_retry_after = None
+        else:
+            normalized_candidate_index = _normalize_image_candidate_index(requested_candidate_index, len(candidates))
+            if normalized_candidate_index is None:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La alternativa de imagen indicada no existe")
+            candidate = candidates[normalized_candidate_index]
+            recipe.image_candidate_index = normalized_candidate_index
+            recipe.image_url = candidate["image_url"]
+            recipe.image_source_url = candidate["image_source_url"]
+            recipe.image_alt_text = candidate.get("image_alt_text") or f"Imagen de {recipe.title}."
+            recipe.image_lookup_status = "found"
+            recipe.image_lookup_reason = (
+                f"Imagen seleccionada manualmente ({normalized_candidate_index + 1} de {len(candidates)})."
+            )
+            recipe.image_lookup_retry_after = None
+
+    if not candidate_index_requested and any(field in changes for field in {"image_url", "image_source_url", "image_alt_text", "image_lookup_status"}):
         recipe.image_candidates = []
         recipe.image_candidate_index = None
         recipe.image_lookup_attempt_count = 0
@@ -1070,6 +1102,8 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "image_url": recipe.image_url,
         "image_source_url": recipe.image_source_url,
         "image_alt_text": recipe.image_alt_text,
+        "image_candidates": candidates,
+        "image_candidate_index": candidate_index,
         "image_lookup_status": image_lookup_status,
         "image_lookup_reason": recipe.image_lookup_reason,
         "image_lookup_attempt_count": attempt_count,
@@ -1221,6 +1255,8 @@ def _image_retry_after_from_payload(payload: dict[str, Any], now: datetime) -> d
 
 def _needs_image_resolution(recipe: Recipe) -> bool:
     if recipe.image_url:
+        return False
+    if _normalize_image_candidates(recipe.image_candidates):
         return False
     status = _normalize_image_lookup_status(recipe.image_lookup_status)
     if status in {"invalid", "not_found", "attempts_exhausted"}:
