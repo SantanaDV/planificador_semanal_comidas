@@ -2,7 +2,6 @@
 
 Este documento convierte la prueba tecnica en una lista operativa para revisar la entrega antes de enviarla. Se usa junto con `CLAUDE.md`: `CLAUDE.md` guarda memoria y decisiones; `RTK.md` marca lo que debe verificarse.
 
-Nota: este archivo local se mantiene por decision del proyecto como "Review and Test Kit". No sustituye al RTK externo de `rtk-ai/rtk`, que es una herramienta CLI para compactar salidas de comandos.
 
 ## Reglas de entrega
 
