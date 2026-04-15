@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from html import unescape
 import re
+import time
 from functools import lru_cache
 from typing import Any
 from unicodedata import combining, normalize as unicode_normalize
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -23,6 +25,9 @@ HTTP_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 MenuPlan/1.0"
 )
 EXPECTED_WEEKLY_ITEMS = len(DAYS) * len(MEAL_TYPES)
+MAX_SLOT_REPAIR_ATTEMPTS = 4
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
+_gemini_rate_limit_until = 0.0
 
 
 class WeeklyMenuResolutionError(Exception):
@@ -43,6 +48,23 @@ def generate_weekly_menu(
         return _build_ai_weekly_response(payload, retried=False)
 
     if payload is None:
+        if call_meta.get("status") == "rate_limited":
+            context = {
+                "error_type": "rate_limited",
+                "call_status": call_meta.get("status"),
+                "status_code": call_meta.get("status_code"),
+                "cooldown_seconds": call_meta.get("cooldown_seconds"),
+            }
+            record_log(
+                "warning",
+                "ai",
+                "Gemini no pudo iniciar la generacion semanal por saturacion temporal",
+                context,
+            )
+            raise WeeklyMenuResolutionError(
+                "Gemini esta temporalmente saturado",
+                context,
+            )
         return _build_full_fallback_weekly_response(
             ingredients,
             generation_context,
@@ -71,6 +93,26 @@ def generate_weekly_menu(
         return _build_ai_weekly_response(retry_payload, retried=True)
 
     if retry_payload is None:
+        if retry_meta.get("status") == "rate_limited":
+            context = {
+                "error_type": "rate_limited",
+                "retry_used": True,
+                "call_status": retry_meta.get("status"),
+                "status_code": retry_meta.get("status_code"),
+                "cooldown_seconds": retry_meta.get("cooldown_seconds"),
+                "initial_invalid_indices": report["invalid_indices"],
+                "initial_invalid_reason": report["invalid_reason"],
+            }
+            record_log(
+                "warning",
+                "ai",
+                "Gemini se saturo durante el reintento semanal; se cancela la reparacion por slots",
+                context,
+            )
+            raise WeeklyMenuResolutionError(
+                "Gemini esta temporalmente saturado durante el reintento semanal",
+                context,
+            )
         record_log(
             "warning",
             "ai",
@@ -84,6 +126,26 @@ def generate_weekly_menu(
     else:
         _log_weekly_validation_failure(retry_report, attempt="retry")
 
+    if len(retry_report["invalid_indices"]) > MAX_SLOT_REPAIR_ATTEMPTS:
+        context = {
+            "error_type": "too_many_invalid_slots_after_retry",
+            "retry_used": True,
+            "invalid_slot_count": len(retry_report["invalid_indices"]),
+            "max_slot_repair_attempts": MAX_SLOT_REPAIR_ATTEMPTS,
+            "retry_invalid_indices": retry_report["invalid_indices"],
+            "retry_invalid_reason": retry_report["invalid_reason"],
+        }
+        record_log(
+            "warning",
+            "ai",
+            "Demasiados huecos invalidos tras el reintento semanal; se evita una cascada de reparaciones por slots",
+            context,
+        )
+        raise WeeklyMenuResolutionError(
+            "El menu semanal sigue demasiado fuera de contexto tras el reintento",
+            context,
+        )
+
     repaired_menu = _repair_weekly_slots_with_ai(
         ingredients,
         generation_context,
@@ -92,6 +154,26 @@ def generate_weekly_menu(
         retry_payload=retry_payload,
         retry_report=retry_report,
     )
+
+    if repaired_menu["aborted_due_to_rate_limit"]:
+        context = {
+            "error_type": "rate_limited",
+            "retry_used": True,
+            "status_code": 429,
+            "aborted_failure": repaired_menu["aborted_failure"],
+            "repaired_item_count": repaired_menu["repaired_item_count"],
+            "slot_attempt_count": repaired_menu["slot_attempt_count"],
+        }
+        record_log(
+            "warning",
+            "ai",
+            "Gemini se saturo durante la reparacion dirigida por slots; se cancela el resto del flujo IA",
+            context,
+        )
+        raise WeeklyMenuResolutionError(
+            "Gemini esta temporalmente saturado durante la reparacion dirigida",
+            context,
+        )
 
     if repaired_menu["unresolved_count"] == 0:
         record_log(
@@ -164,10 +246,21 @@ def generate_replacement(
 
 def resolve_recipe_image(recipe: dict[str, Any]) -> dict[str, Any] | None:
     prompt = _build_image_lookup_prompt(recipe)
-    payload = _call_gemini(prompt, use_google_search=settings.gemini_enable_google_search, timeout_seconds=35)
+    payload, call_meta = _call_gemini_with_meta(
+        prompt,
+        use_google_search=settings.gemini_enable_google_search,
+        timeout_seconds=35,
+    )
+    recipe_title = str(recipe.get("title") or "receta")
+    if payload is None:
+        return _image_lookup_error_payload(recipe_title, call_meta)
     if not isinstance(payload, dict):
-        return None
-    return _normalize_image_lookup(payload, str(recipe.get("title") or "receta"))
+        return {
+            **_empty_image_lookup(),
+            "image_lookup_status": "upstream_error",
+            "image_lookup_reason": "La IA devolvio una respuesta no valida al buscar la imagen de la receta.",
+        }
+    return _normalize_image_lookup(payload, recipe_title)
 
 
 def _call_gemini_with_meta(
@@ -176,6 +269,7 @@ def _call_gemini_with_meta(
     use_google_search: bool,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    global _gemini_rate_limit_until
     if not settings.has_valid_gemini_api_key:
         record_log(
             "warning",
@@ -184,6 +278,25 @@ def _call_gemini_with_meta(
             {"model": settings.gemini_model},
         )
         return None, {"status": "missing_api_key", "model": settings.gemini_model}
+
+    cooldown_seconds = _active_rate_limit_cooldown_seconds()
+    if cooldown_seconds > 0:
+        record_log(
+            "warning",
+            "ai",
+            "Se evita una nueva llamada a Gemini durante el cooldown local por rate limit",
+            {
+                "model": settings.gemini_model,
+                "google_search_enabled": use_google_search,
+                "cooldown_seconds": cooldown_seconds,
+            },
+        )
+        return None, {
+            "status": "rate_limited",
+            "status_code": 429,
+            "cooldown_seconds": cooldown_seconds,
+            "model": settings.gemini_model,
+        }
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
     generation_config: dict[str, Any] = {"temperature": 0.3}
@@ -204,10 +317,35 @@ def _call_gemini_with_meta(
             response.raise_for_status()
         text = _extract_text(response.json())
         return _parse_json(text), {"status": "ok", "model": settings.gemini_model}
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        status = "rate_limited" if status_code == 429 else "call_error"
+        cooldown_seconds = None
+        if status_code == 429:
+            cooldown_seconds = _set_rate_limit_cooldown(exc.response.headers.get("retry-after"))
+        record_exception(
+            "ai",
+            "Gemini devolvio un error HTTP",
+            exc,
+            {
+                "model": settings.gemini_model,
+                "google_search_enabled": use_google_search,
+                "timeout_seconds": timeout_seconds,
+                "status_code": status_code,
+                "cooldown_seconds": cooldown_seconds,
+            },
+        )
+        return None, {
+            "status": status,
+            "status_code": status_code,
+            "cooldown_seconds": cooldown_seconds,
+            "model": settings.gemini_model,
+            "exception_type": exc.__class__.__name__,
+        }
     except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError) as exc:
         record_exception(
             "ai",
-            "Fallo llamando a Gemini; se usa fallback local",
+            "Fallo llamando a Gemini",
             exc,
             {
                 "model": settings.gemini_model,
@@ -216,10 +354,29 @@ def _call_gemini_with_meta(
             },
         )
         return None, {
-            "status": "call_error",
-            "model": settings.gemini_model,
-            "exception_type": exc.__class__.__name__,
-        }
+        "status": "call_error",
+        "model": settings.gemini_model,
+        "exception_type": exc.__class__.__name__,
+    }
+
+
+def _active_rate_limit_cooldown_seconds() -> int:
+    remaining = int(round(_gemini_rate_limit_until - time.monotonic()))
+    return max(remaining, 0)
+
+
+def _set_rate_limit_cooldown(retry_after_header: str | None) -> int:
+    global _gemini_rate_limit_until
+    cooldown_seconds = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+    if isinstance(retry_after_header, str):
+        raw_value = retry_after_header.strip()
+        if raw_value:
+            try:
+                cooldown_seconds = max(int(float(raw_value)), 1)
+            except ValueError:
+                cooldown_seconds = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+    _gemini_rate_limit_until = time.monotonic() + cooldown_seconds
+    return cooldown_seconds
 
 
 def _call_gemini(
@@ -282,11 +439,12 @@ def _build_weekly_prompt(
         "6. Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos`. No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
         "7. En el campo `ingredients` solo puedes incluir ingredientes de esa lista cerrada o ingredientes de `despensa_basica_permitida`, nunca otros ingredientes.\n"
         "8. La despensa basica solo puede actuar como apoyo. No la conviertas en la base real del plato ni en el elemento que define el tipo de receta.\n"
-        "9. No uses mas ingredientes de despensa que ingredientes reales de nevera en una receta. Como maximo usa `politica_despensa.max_pantry_ingredients_per_recipe` ingredientes de despensa.\n"
-        "10. Solo puedes usar como maximo `politica_despensa.max_structural_pantry_ingredients_per_recipe` ingrediente estructural de despensa por receta. Los ingredientes estructurales estan en `despensa_basica_estructural_limitada`.\n"
-        "11. Si una receta solo usa 1 ingrediente de nevera, apoyate solo en apoyos ligeros de `despensa_basica_apoyo` y nunca en ingredientes estructurales de despensa.\n"
-        "12. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
-        "13. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
+        "9. Los ingredientes de `despensa_basica_apoyo_libre` son apoyos ultrabasicos y no cuentan para el limite de despensa mientras sigan siendo secundarios.\n"
+        "10. No uses mas ingredientes de despensa contables que ingredientes reales de nevera en una receta. Como maximo usa `politica_despensa.max_pantry_ingredients_per_recipe` ingredientes de despensa contables.\n"
+        "11. Solo puedes usar como maximo `politica_despensa.max_structural_pantry_ingredients_per_recipe` ingrediente estructural de despensa por receta. Los ingredientes estructurales estan en `despensa_basica_estructural_limitada`.\n"
+        "12. Si una receta solo usa 1 ingrediente de nevera, apoyate solo en apoyos ligeros de `despensa_basica_apoyo` y nunca en ingredientes estructurales de despensa.\n"
+        "13. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
+        "14. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -324,10 +482,11 @@ def _build_weekly_retry_prompt(
         "2. Excluye por completo cualquier ingrediente marcado por el usuario.\n"
         "3. No uses ingredientes principales fuera de `ingredientes_principales_permitidos`.\n"
         "4. En `ingredients` solo puedes incluir ingredientes disponibles o `despensa_basica_permitida`.\n"
-        "5. No uses mas ingredientes de despensa que ingredientes de nevera y respeta `politica_despensa`.\n"
-        "6. Si solo hay 1 ingrediente de nevera en la receta, no uses ingredientes estructurales de `despensa_basica_estructural_limitada`.\n"
-        "7. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
-        "8. Evita repetir titulos de recetas recientes.\n"
+        "5. Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
+        "6. No uses mas ingredientes de despensa contables que ingredientes de nevera y respeta `politica_despensa`.\n"
+        "7. Si solo hay 1 ingrediente de nevera en la receta, no uses ingredientes estructurales de `despensa_basica_estructural_limitada`.\n"
+        "8. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
+        "9. Evita repetir titulos de recetas recientes.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -349,7 +508,8 @@ def _build_replacement_prompt(
         "Usa ingredientes disponibles, respeta exclusiones, prioriza favoritas compatibles y evita recetas recientes.\n"
         "Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos` o ingredientes de `despensa_basica_permitida`.\n"
         "No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
-        "La despensa basica solo puede apoyar: no debe haber mas ingredientes de despensa que de nevera, y si solo usas 1 ingrediente de nevera no puedes apoyarte en ingredientes estructurales de despensa.\n"
+        "Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
+        "La despensa basica solo puede apoyar: no debe haber mas ingredientes de despensa contables que de nevera, y si solo usas 1 ingrediente de nevera no puedes apoyarte en ingredientes estructurales de despensa.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
@@ -368,14 +528,14 @@ def _build_image_lookup_prompt(recipe: dict[str, Any]) -> str:
     return (
         "Actua como un asistente que busca una imagen real para una receta ya existente. "
         "Devuelve solo un objeto JSON valido, sin markdown, sin texto extra.\n"
-        "Busca una imagen real representativa del plato usando la busqueda web disponible.\n"
-        "Devuelve image_url solo si puedes aportar una URL directa de imagen accesible por HTTP o HTTPS.\n"
-        "Devuelve image_source_url con la pagina donde encontraste la imagen, si existe.\n"
+        "Busca una pagina fuente real y relevante del plato usando la busqueda web disponible.\n"
+        "Prioriza siempre image_source_url como la pagina donde aparece el plato.\n"
+        "Devuelve image_url solo si estas seguro de que es una URL directa y real de imagen, pero no es obligatorio.\n"
         "Nunca inventes URLs ni dominios.\n"
-        "Si no encuentras una imagen real verificable, devuelve image_url null y image_lookup_status \"not_found\".\n"
+        "Si no puedes localizar una pagina fuente fiable, devuelve image_source_url null e image_lookup_status \"not_found\".\n"
         f"Receta: {json.dumps(lookup_context, ensure_ascii=False)}\n"
         "Formato exacto: "
-        "{\"image_url\":\"https://example.com/imagen.jpg\",\"image_source_url\":\"https://example.com/receta\","
+        "{\"image_source_url\":\"https://example.com/receta\",\"image_url\":null,"
         "\"image_alt_text\":\"...\",\"image_lookup_status\":\"found\",\"image_lookup_reason\":\"...\"}"
     )
 
@@ -404,6 +564,7 @@ def _prompt_context(
         "recetas_recientes_a_evitar": generation_context.get("recent_recipe_titles") or [],
         "despensa_basica_permitida": generation_context.get("pantry_basics") or [],
         "despensa_basica_apoyo": generation_context.get("pantry_support_basics") or [],
+        "despensa_basica_apoyo_libre": generation_context.get("pantry_free_support_basics") or [],
         "despensa_basica_estructural_limitada": generation_context.get("pantry_structural_basics") or [],
         "politica_despensa": generation_context.get("pantry_policy") or {},
         "recetas_guardadas_compatibles": [
@@ -600,6 +761,11 @@ def _validate_recipe_context(
         for name in (generation_context.get("pantry_support_basics") or [])
         if str(name).strip()
     }
+    pantry_free_support_basics = {
+        _normalize_name(str(name))
+        for name in (generation_context.get("pantry_free_support_basics") or [])
+        if str(name).strip()
+    }
     pantry_structural_basics = {
         _normalize_name(str(name))
         for name in (generation_context.get("pantry_structural_basics") or [])
@@ -655,12 +821,16 @@ def _validate_recipe_context(
             excluded_hits.append(ingredient_name)
             continue
         if any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_basics):
-            pantry_ingredient_count += 1
-            pantry_hits.append(ingredient_name)
-            if any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_structural_basics):
-                structural_pantry_count += 1
-            if not any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_support_basics):
-                pantry_non_support_hits.append(ingredient_name)
+            is_free_support = any(
+                _matches_name(ingredient_name, pantry_name) for pantry_name in pantry_free_support_basics
+            )
+            if not is_free_support:
+                pantry_ingredient_count += 1
+                pantry_hits.append(ingredient_name)
+                if any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_structural_basics):
+                    structural_pantry_count += 1
+                if not any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_support_basics):
+                    pantry_non_support_hits.append(ingredient_name)
             continue
         if not any(_matches_name(ingredient_name, allowed_name) for allowed_name in allowed_names):
             disallowed_hits.append(ingredient_name)
@@ -965,6 +1135,17 @@ def _repair_weekly_slots_with_ai(
 
         unresolved_indices.append(index)
         repair_failures.append(failure)
+        if failure.get("call_status") == "rate_limited":
+            return {
+                "items": final_items,
+                "repaired_item_count": repaired_item_count,
+                "slot_attempt_count": slot_attempt_count,
+                "unresolved_count": len(unresolved_indices),
+                "unresolved_indices": unresolved_indices,
+                "repair_failures": repair_failures,
+                "aborted_due_to_rate_limit": True,
+                "aborted_failure": failure,
+            }
 
     return {
         "items": final_items,
@@ -973,6 +1154,8 @@ def _repair_weekly_slots_with_ai(
         "unresolved_count": len(unresolved_indices),
         "unresolved_indices": unresolved_indices,
         "repair_failures": repair_failures,
+        "aborted_due_to_rate_limit": False,
+        "aborted_failure": None,
     }
 
 
@@ -1229,47 +1412,52 @@ def _normalize_image_lookup(recipe: dict[str, Any], recipe_title: str) -> dict[s
     alt_text = _clean_text(recipe.get("image_alt_text"), 240)
     status = _normalize_image_status(recipe.get("image_lookup_status"))
     reason = _clean_text(recipe.get("image_lookup_reason"), 240)
-    resolved_source_url = _resolve_source_url(raw_source_url) if raw_source_url else None
+    source_result = _extract_image_from_source_page(raw_source_url) if raw_source_url else None
+    direct_image_url = _resolve_image_url(raw_image_url) if raw_image_url else None
 
-    if not raw_image_url:
+    if source_result and source_result["image_url"]:
         return {
-            "image_url": None,
-            "image_source_url": resolved_source_url,
-            "image_alt_text": alt_text,
-            "image_lookup_status": "not_found",
-            "image_lookup_reason": reason or "La IA no encontro una imagen real verificable para esta receta.",
+            "image_url": source_result["image_url"],
+            "image_source_url": source_result["image_source_url"],
+            "image_alt_text": alt_text or f"Imagen de {recipe_title}.",
+            "image_lookup_status": "found",
+            "image_lookup_reason": source_result["image_lookup_reason"] or reason,
         }
 
-    resolved_image_url = _resolve_image_url(raw_image_url)
-    if not resolved_image_url:
+    if direct_image_url:
+        final_source_url = source_result["image_source_url"] if source_result else (raw_source_url or None)
+        return {
+            "image_url": direct_image_url,
+            "image_source_url": final_source_url,
+            "image_alt_text": alt_text or f"Imagen de {recipe_title}.",
+            "image_lookup_status": "found",
+            "image_lookup_reason": reason or "Gemini encontro una imagen directa valida para esta receta.",
+        }
+
+    if raw_image_url and not direct_image_url:
         record_log(
             "warning",
             "ai",
-            "La URL de imagen devuelta por Gemini no se pudo validar",
+            "La URL de imagen directa devuelta por Gemini no se pudo validar",
             {"recipe_title": recipe_title},
         )
+
+    if source_result:
+        final_reason = source_result["image_lookup_reason"] or reason
         return {
             "image_url": None,
-            "image_source_url": resolved_source_url,
+            "image_source_url": source_result["image_source_url"],
             "image_alt_text": alt_text,
-            "image_lookup_status": "invalid",
-            "image_lookup_reason": "La IA propuso una imagen, pero la URL no se pudo validar como imagen directa.",
+            "image_lookup_status": source_result["image_lookup_status"],
+            "image_lookup_reason": final_reason,
         }
 
-    final_reason = reason
-    if not final_reason:
-        final_reason = (
-            "Gemini encontro una imagen real y una pagina fuente para esta receta."
-            if resolved_source_url
-            else "Gemini encontro una imagen real, pero no se pudo resolver una pagina fuente canonical."
-        )
-
     return {
-        "image_url": resolved_image_url,
-        "image_source_url": resolved_source_url,
-        "image_alt_text": alt_text or f"Imagen de {recipe_title}.",
-        "image_lookup_status": "found" if status != "invalid" else "invalid",
-        "image_lookup_reason": final_reason,
+        "image_url": None,
+        "image_source_url": raw_source_url,
+        "image_alt_text": alt_text,
+        "image_lookup_status": status if status != "found" else "not_found",
+        "image_lookup_reason": reason or "La IA no encontro una pagina fuente fiable para esta receta.",
     }
 
 
@@ -1280,12 +1468,177 @@ def _empty_image_lookup() -> dict[str, Any]:
         "image_alt_text": None,
         "image_lookup_status": None,
         "image_lookup_reason": None,
+        "cooldown_seconds": None,
     }
 
 
 def _normalize_image_status(value: Any) -> str:
     status = str(value or "").strip().lower()
-    return status if status in {"found", "not_found", "invalid"} else "not_found"
+    return status if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"} else "not_found"
+
+
+def _image_lookup_error_payload(recipe_title: str, call_meta: dict[str, Any]) -> dict[str, Any]:
+    status = str(call_meta.get("status") or "").strip().lower()
+    if status == "rate_limited":
+        cooldown_seconds = call_meta.get("cooldown_seconds")
+        return {
+            **_empty_image_lookup(),
+            "image_lookup_status": "rate_limited",
+            "image_lookup_reason": (
+                f"Gemini esta temporalmente saturado al buscar la imagen de {recipe_title}. "
+                f"Espera {cooldown_seconds} segundos y vuelve a intentarlo."
+                if cooldown_seconds
+                else "Gemini esta temporalmente saturado al buscar la imagen de esta receta."
+            ),
+            "cooldown_seconds": cooldown_seconds,
+        }
+    return {
+        **_empty_image_lookup(),
+        "image_lookup_status": "upstream_error",
+        "image_lookup_reason": "No se pudo consultar a Gemini para buscar una imagen de esta receta en este momento.",
+    }
+
+
+def _extract_image_from_source_page(source_url: str) -> dict[str, Any]:
+    page = _fetch_source_page(source_url)
+    if page is None:
+        return {
+            "image_url": None,
+            "image_source_url": source_url,
+            "image_lookup_status": "upstream_error",
+            "image_lookup_reason": "No se pudo consultar la pagina fuente propuesta por la IA.",
+        }
+
+    final_source_url = page["source_url"]
+    candidates = _extract_image_candidates_from_html(page["html"], final_source_url)
+    if not candidates:
+        return {
+            "image_url": None,
+            "image_source_url": final_source_url,
+            "image_lookup_status": "not_found",
+            "image_lookup_reason": "La pagina fuente no expone una imagen reutilizable en sus metadatos principales.",
+        }
+
+    for candidate in candidates:
+        resolved_image_url = _resolve_image_url(candidate)
+        if resolved_image_url:
+            return {
+                "image_url": resolved_image_url,
+                "image_source_url": final_source_url,
+                "image_lookup_status": "found",
+                "image_lookup_reason": "Se encontro una imagen valida a partir de los metadatos de la pagina fuente.",
+            }
+
+    return {
+        "image_url": None,
+        "image_source_url": final_source_url,
+        "image_lookup_status": "invalid",
+        "image_lookup_reason": "La pagina fuente incluia referencias de imagen, pero ninguna se pudo validar como imagen real.",
+    }
+
+
+@lru_cache(maxsize=128)
+def _fetch_source_page(source_url: str) -> dict[str, str] | None:
+    headers = {
+        "User-Agent": HTTP_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    }
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True, headers=headers) as client:
+            with client.stream("GET", source_url) as response:
+                if response.status_code >= 400:
+                    return None
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if "html" not in content_type and "xml" not in content_type:
+                    return None
+                html = response.read().decode(response.encoding or "utf-8", errors="ignore")
+                return {"source_url": str(response.url), "html": html}
+    except httpx.HTTPError:
+        return None
+
+
+def _extract_image_candidates_from_html(html: str, source_url: str) -> list[str]:
+    candidates: list[str] = []
+    for candidate in _extract_meta_image_candidates(html):
+        normalized = _normalize_html_image_candidate(candidate, source_url)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    for candidate in _extract_jsonld_image_candidates(html):
+        normalized = _normalize_html_image_candidate(candidate, source_url)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    return candidates[:8]
+
+
+def _extract_meta_image_candidates(html: str) -> list[str]:
+    candidates: list[str] = []
+    for raw_tag in re.findall(r"<meta\b[^>]*>", html, flags=re.IGNORECASE):
+        attributes = dict(
+            (match.group(1).lower(), unescape(match.group(2) or match.group(3) or match.group(4) or "").strip())
+            for match in re.finditer(r'([a-zA-Z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^>\s]+))', raw_tag)
+        )
+        marker = (attributes.get("property") or attributes.get("name") or "").lower()
+        if marker in {"og:image", "og:image:url", "twitter:image", "twitter:image:src"}:
+            content = attributes.get("content")
+            if content:
+                candidates.append(content)
+    return candidates
+
+
+def _extract_jsonld_image_candidates(html: str) -> list[str]:
+    candidates: list[str] = []
+    for raw_json in re.findall(
+        r"<script\b[^>]*type=(?:\"application/ld\+json\"|'application/ld\+json')[^>]*>(.*?)</script>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            parsed = json.loads(unescape(raw_json).strip())
+        except json.JSONDecodeError:
+            continue
+        for candidate in _find_jsonld_image_values(parsed):
+            if candidate:
+                candidates.append(candidate)
+    return candidates
+
+
+def _find_jsonld_image_values(value: Any) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key.lower() in {"image", "thumbnailurl", "contenturl"}:
+                candidates.extend(_coerce_jsonld_image_candidate(nested))
+            else:
+                candidates.extend(_find_jsonld_image_values(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            candidates.extend(_find_jsonld_image_values(nested))
+    return candidates
+
+
+def _coerce_jsonld_image_candidate(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        candidates: list[str] = []
+        for item in value:
+            candidates.extend(_coerce_jsonld_image_candidate(item))
+        return candidates
+    if isinstance(value, dict):
+        url = value.get("url") or value.get("@id") or value.get("contentUrl")
+        if isinstance(url, str):
+            return [url]
+    return []
+
+
+def _normalize_html_image_candidate(candidate: str, source_url: str) -> str | None:
+    cleaned = candidate.strip()
+    if not cleaned or cleaned.startswith("data:"):
+        return None
+    absolute = urljoin(source_url, cleaned)
+    return _clean_http_url(absolute)
 
 
 def _clean_text(value: Any, limit: int) -> str | None:

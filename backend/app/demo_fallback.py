@@ -154,7 +154,7 @@ def _pick_saved_recipe(
 
 def _saved_recipe_image_lookup_status(recipe: dict[str, Any]) -> str:
     status = str(recipe.get("image_lookup_status") or "").strip().lower()
-    if status in {"found", "not_found", "invalid"}:
+    if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"}:
         return status
     if str(recipe.get("image_url") or "").strip():
         return "found"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unicodedata import combining, normalize
 
@@ -27,6 +27,8 @@ from .schemas import (
     RecipeOut,
     RecipeUpdate,
     ReplaceItemRequest,
+    ResolveRecipeImagesOut,
+    ResolveRecipeImagesRequest,
     SystemLogCreate,
     SystemLogOut,
     UseRecipeRequest,
@@ -46,6 +48,12 @@ PANTRY_SUPPORT_BASICS = [
     "oregano",
     "pimenton dulce",
     "comino",
+]
+PANTRY_FREE_SUPPORT_BASICS = [
+    "aceite de oliva",
+    "sal",
+    "pimienta",
+    "agua",
 ]
 PANTRY_STRUCTURAL_BASICS = [
     "mantequilla",
@@ -327,7 +335,7 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
 
 
 @app.post("/recipes/{recipe_id}/resolve-image", response_model=RecipeOut)
-def resolve_recipe_image(recipe_id: str, session: Session = Depends(get_session)) -> Recipe:
+def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), session: Session = Depends(get_session)) -> Recipe:
     recipe = session.get(Recipe, recipe_id)
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
@@ -335,22 +343,11 @@ def resolve_recipe_image(recipe_id: str, session: Session = Depends(get_session)
     if not settings.has_valid_gemini_api_key:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
 
+    if not force and _should_skip_image_resolution(recipe):
+        return recipe
+
     image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
-    if image_payload:
-        recipe.image_url = image_payload.get("image_url")
-        recipe.image_source_url = image_payload.get("image_source_url")
-        recipe.image_alt_text = image_payload.get("image_alt_text")
-        recipe.image_lookup_status = _normalize_image_lookup_status(
-            image_payload.get("image_lookup_status"),
-            image_payload.get("image_url"),
-        )
-        recipe.image_lookup_reason = image_payload.get("image_lookup_reason")
-    else:
-        recipe.image_url = None
-        recipe.image_source_url = None
-        recipe.image_alt_text = None
-        recipe.image_lookup_status = "not_found"
-        recipe.image_lookup_reason = "No se pudo resolver una imagen con IA en este momento."
+    _apply_image_lookup_payload(recipe, image_payload)
 
     session.commit()
     session.refresh(recipe)
@@ -365,6 +362,69 @@ def resolve_recipe_image(recipe_id: str, session: Session = Depends(get_session)
         },
     )
     return recipe
+
+
+@app.post("/recipes/resolve-images", response_model=ResolveRecipeImagesOut)
+def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session = Depends(get_session)) -> ResolveRecipeImagesOut:
+    if not settings.has_valid_gemini_api_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
+
+    query = select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc())
+    recipes = list(session.scalars(query))
+    requested_ids = {recipe_id.strip() for recipe_id in payload.recipe_ids if recipe_id.strip()}
+    if requested_ids:
+        recipes = [recipe for recipe in recipes if recipe.id in requested_ids]
+
+    attempted_count = 0
+    skipped_count = 0
+    updated_recipes: list[Recipe] = []
+    stopped_reason: str | None = None
+
+    for recipe in recipes:
+        if attempted_count >= payload.limit:
+            break
+        if not payload.force and _should_skip_image_resolution(recipe):
+            skipped_count += 1
+            continue
+
+        image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+        _apply_image_lookup_payload(recipe, image_payload)
+        updated_recipes.append(recipe)
+        attempted_count += 1
+
+        if recipe.image_lookup_status in {"rate_limited", "upstream_error"}:
+            stopped_reason = recipe.image_lookup_status
+            break
+
+    session.commit()
+    for recipe in updated_recipes:
+        session.refresh(recipe)
+
+    remaining_pending_count = sum(1 for recipe in recipes if _needs_image_resolution(recipe))
+    message = _image_batch_message(updated_recipes, attempted_count, remaining_pending_count, stopped_reason)
+
+    record_log(
+        "info" if not stopped_reason else "warning",
+        "ai",
+        "Resolucion bajo demanda de imagenes de recetas completada",
+        {
+            "attempted_count": attempted_count,
+            "updated_count": len(updated_recipes),
+            "skipped_count": skipped_count,
+            "remaining_pending_count": remaining_pending_count,
+            "stopped_reason": stopped_reason,
+        },
+    )
+
+    return ResolveRecipeImagesOut(
+        updated_recipes=updated_recipes,
+        attempted_count=attempted_count,
+        updated_count=len(updated_recipes),
+        skipped_count=skipped_count,
+        remaining_pending_count=remaining_pending_count,
+        stopped_reason=stopped_reason,
+        message=message,
+    )
 
 
 @app.delete("/recipes/{recipe_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
@@ -445,10 +505,16 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
     try:
         generated = ai.generate_weekly_menu(ingredients, generation_context)
     except ai.WeeklyMenuResolutionError as exc:
+        error_type = str(exc.context.get("error_type") or "").strip()
+        cooldown_seconds = exc.context.get("cooldown_seconds")
         record_log(
             "warning",
             "menu_planning",
-            "No se pudo cerrar un menu semanal 100% IA tras reparacion dirigida",
+            (
+                "Gemini no pudo completar el menu semanal por saturacion temporal"
+                if error_type == "rate_limited"
+                else "No se pudo cerrar un menu semanal 100% IA tras reparacion dirigida"
+            ),
             {
                 "ingredient_count": len(all_ingredients),
                 "usable_ingredient_count": len(ingredients),
@@ -459,9 +525,23 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             },
         )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=(
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if error_type == "rate_limited"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
             detail=(
-                "La IA no pudo cerrar un menu semanal valido con las reglas actuales. "
+                (
+                    (
+                        "Gemini esta temporalmente saturado y no ha podido completar el menu semanal. "
+                        f"Espera {int(cooldown_seconds)} segundos y vuelve a intentarlo."
+                    )
+                    if isinstance(cooldown_seconds, int) and cooldown_seconds > 0
+                    else "Gemini esta temporalmente saturado y no ha podido completar el menu semanal. "
+                    "Espera un momento y vuelve a intentarlo."
+                )
+                if error_type == "rate_limited"
+                else "La IA no pudo cerrar un menu semanal valido con las reglas actuales. "
                 "Prueba a regenerar o revisa los ingredientes disponibles."
             ),
         ) from exc
@@ -692,6 +772,10 @@ def ensure_recipe_edit_columns() -> None:
         statements.append(("image_lookup_status", "ALTER TABLE recipes ADD COLUMN image_lookup_status VARCHAR(40)"))
     if "image_lookup_reason" not in columns:
         statements.append(("image_lookup_reason", "ALTER TABLE recipes ADD COLUMN image_lookup_reason TEXT"))
+    if "image_lookup_attempted_at" not in columns:
+        statements.append(("image_lookup_attempted_at", "ALTER TABLE recipes ADD COLUMN image_lookup_attempted_at TIMESTAMP"))
+    if "image_lookup_retry_after" not in columns:
+        statements.append(("image_lookup_retry_after", "ALTER TABLE recipes ADD COLUMN image_lookup_retry_after TIMESTAMP"))
     if "is_favorite" not in columns:
         statements.append(("is_favorite", "ALTER TABLE recipes ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT FALSE"))
 
@@ -924,6 +1008,8 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "image_alt_text": recipe.image_alt_text,
         "image_lookup_status": _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url),
         "image_lookup_reason": recipe.image_lookup_reason,
+        "image_lookup_attempted_at": recipe.image_lookup_attempted_at,
+        "image_lookup_retry_after": recipe.image_lookup_retry_after,
         "source": recipe.source,
         "is_favorite": recipe.is_favorite,
         "created_at": recipe.created_at,
@@ -943,6 +1029,8 @@ def _normalize_recipe_image_fields(value: Any) -> dict[str, Any]:
         "image_alt_text": image_alt_text,
         "image_lookup_status": image_lookup_status,
         "image_lookup_reason": image_lookup_reason,
+        "image_lookup_attempted_at": None,
+        "image_lookup_retry_after": None,
     }
 
 
@@ -955,11 +1043,83 @@ def _clean_optional_string(value: Any, limit: int) -> str | None:
 
 def _normalize_image_lookup_status(value: Any, image_url: Any = None) -> str | None:
     status = str(value or "").strip().lower()
-    if status in {"found", "not_found", "invalid"}:
+    if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"}:
         return status
     if isinstance(image_url, str) and image_url.strip():
         return "found"
     return None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _apply_image_lookup_payload(recipe: Recipe, image_payload: dict[str, Any] | None) -> None:
+    now = _utcnow()
+    payload = image_payload if isinstance(image_payload, dict) else {}
+    recipe.image_url = _clean_optional_string(payload.get("image_url"), 500)
+    recipe.image_source_url = _clean_optional_string(payload.get("image_source_url"), 500)
+    recipe.image_alt_text = _clean_optional_string(payload.get("image_alt_text"), 240)
+    recipe.image_lookup_status = _normalize_image_lookup_status(payload.get("image_lookup_status"), recipe.image_url)
+    recipe.image_lookup_reason = _clean_optional_string(payload.get("image_lookup_reason"), 240)
+    recipe.image_lookup_attempted_at = now
+    recipe.image_lookup_retry_after = _image_retry_after_from_payload(payload, now)
+
+
+def _image_retry_after_from_payload(payload: dict[str, Any], now: datetime) -> datetime | None:
+    status = _normalize_image_lookup_status(payload.get("image_lookup_status"))
+    cooldown_seconds = payload.get("cooldown_seconds")
+    if status == "rate_limited":
+        try:
+            seconds = max(int(cooldown_seconds), 1)
+        except (TypeError, ValueError):
+            seconds = 30
+        return now + timedelta(seconds=seconds)
+    if status == "upstream_error":
+        return now + timedelta(minutes=10)
+    return None
+
+
+def _needs_image_resolution(recipe: Recipe) -> bool:
+    if recipe.image_url:
+        return False
+    status = _normalize_image_lookup_status(recipe.image_lookup_status)
+    if status in {"invalid", "not_found"}:
+        return False
+    if status in {"rate_limited", "upstream_error"}:
+        retry_after = _coerce_utc_datetime(recipe.image_lookup_retry_after)
+        return retry_after is None or retry_after <= _utcnow()
+    return True
+
+
+def _should_skip_image_resolution(recipe: Recipe) -> bool:
+    return not _needs_image_resolution(recipe)
+
+
+def _image_batch_message(
+    updated_recipes: list[Recipe],
+    attempted_count: int,
+    remaining_pending_count: int,
+    stopped_reason: str | None,
+) -> str:
+    if stopped_reason == "rate_limited":
+        return "Gemini esta saturado. La resolucion de imagenes se pausara temporalmente."
+    if stopped_reason == "upstream_error":
+        return "La resolucion de imagenes se ha detenido por un error temporal del proveedor."
+    if attempted_count == 0:
+        return "No habia recetas nuevas pendientes de resolver imagen."
+    found_count = sum(1 for recipe in updated_recipes if recipe.image_lookup_status == "found" and recipe.image_url)
+    if remaining_pending_count > 0:
+        return f"Se actualizaron {found_count} imagenes y quedan {remaining_pending_count} recetas pendientes."
+    return f"Resolucion de imagenes completada. {found_count} recetas tienen foto validada."
 
 
 def _difficulty_from_minutes(minutes: int) -> str:
@@ -1200,12 +1360,14 @@ def _build_generation_context(
         "favorite_recipe_titles": favorite_recipe_titles,
         "pantry_basics": PANTRY_BASICS,
         "pantry_support_basics": PANTRY_SUPPORT_BASICS,
+        "pantry_free_support_basics": PANTRY_FREE_SUPPORT_BASICS,
         "pantry_structural_basics": PANTRY_STRUCTURAL_BASICS,
         "pantry_policy": {
             "max_pantry_ingredients_per_recipe": MAX_PANTRY_INGREDIENTS_PER_RECIPE,
             "max_structural_pantry_ingredients_per_recipe": MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE,
             "single_fridge_ingredient_allows_structural_pantry": False,
             "single_fridge_ingredient_max_pantry": 2,
+            "free_support_basics_do_not_count": True,
         },
     }
 

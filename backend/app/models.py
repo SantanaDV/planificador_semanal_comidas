@@ -77,6 +77,8 @@ class Recipe(Base):
     image_alt_text: Mapped[str | None] = mapped_column(Text)
     image_lookup_status: Mapped[str | None] = mapped_column(String(40))
     image_lookup_reason: Mapped[str | None] = mapped_column(Text)
+    image_lookup_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    image_lookup_retry_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(40), default="ai")
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -30,8 +30,10 @@ type Recipe = {
   image_url?: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
-  image_lookup_status?: "found" | "not_found" | "invalid" | null;
+  image_lookup_status?: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
   image_lookup_reason?: string | null;
+  image_lookup_attempted_at?: string | null;
+  image_lookup_retry_after?: string | null;
   source: string;
   is_favorite: boolean;
 };
@@ -66,6 +68,7 @@ type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "recipeDetail" 
 type LogLevel = "info" | "warning" | "error";
 type GenerationGuard = "empty" | "insufficient" | "excluded_insufficient" | "fallback" | null;
 type IngredientSort = "expiry_asc" | "expiry_desc" | "quantity_asc" | "quantity_desc";
+type MenuGenerationPhase = "idle" | "loading" | "success" | "error" | "rate_limited";
 
 type PreferenceSettings = {
   dietType: string;
@@ -105,7 +108,7 @@ type RecipeMutationPayload = {
   image_url: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
-  image_lookup_status?: "found" | "not_found" | "invalid" | null;
+  image_lookup_status?: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
   image_lookup_reason?: string | null;
   is_favorite: boolean;
 };
@@ -121,6 +124,30 @@ type IngredientForm = {
   quantity: string;
   categoryId: string;
   expiresAt: string;
+};
+
+type MenuGenerationFeedback = {
+  phase: MenuGenerationPhase;
+  message: string;
+  cooldownSeconds: number | null;
+};
+
+type RecipeImageBatchFeedback = {
+  phase: MenuGenerationPhase;
+  message: string;
+  cooldownSeconds: number | null;
+  attemptedCount: number;
+  remainingCount: number;
+};
+
+type ResolveRecipeImagesResponse = {
+  updated_recipes: Recipe[];
+  attempted_count: number;
+  updated_count: number;
+  skipped_count: number;
+  remaining_pending_count: number;
+  stopped_reason: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
+  message: string;
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -162,6 +189,16 @@ const defaultPreferenceSettings: PreferenceSettings = {
 };
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
 
+class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -180,7 +217,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       errorMessage = errorText || errorMessage;
     }
-    throw new Error(errorMessage);
+    throw new ApiError(response.status, errorMessage);
   }
 
   if (response.status === 204) {
@@ -197,6 +234,17 @@ function mealRank(mealType: string) {
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function getApiErrorStatus(error: unknown) {
+  return error instanceof ApiError ? error.status : null;
+}
+
+function parseCooldownSeconds(message: string) {
+  const match = message.match(/Espera (\d+) segundos/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function reportClientLog(
@@ -307,6 +355,12 @@ function getRecipeImageReason(recipe: Recipe) {
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) {
     return "Todavia no se ha intentado resolver una imagen real para esta receta.";
   }
+  if (recipe.image_lookup_status === "rate_limited") {
+    return normalizedReason || "La resolucion de imagen se ha pausado por saturacion temporal del proveedor.";
+  }
+  if (recipe.image_lookup_status === "upstream_error") {
+    return normalizedReason || "No se pudo consultar la fuente externa de imagen en este momento.";
+  }
   if (recipe.image_lookup_status === "invalid") {
     return normalizedReason || "Se encontro una referencia, pero no se pudo validar como imagen directa.";
   }
@@ -322,19 +376,32 @@ function getRecipeImageReason(recipe: Recipe) {
 function getRecipeImageStatus(recipe: Recipe) {
   if (getRecipeImage(recipe)) return "Imagen encontrada";
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Imagen pendiente";
+  if (recipe.image_lookup_status === "rate_limited") return "Pausada por saturacion";
+  if (recipe.image_lookup_status === "upstream_error") return "Error temporal";
   if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
   return "Sin imagen disponible";
 }
 
-function getRecipeImageBadge(recipe: Recipe) {
-  if (getRecipeImage(recipe)) return "Foto";
-  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Pendiente";
-  if (recipe.image_lookup_status === "invalid") return "Sin validar";
-  return "Sin foto";
-}
-
 function getRecipeImageSourceUrl(recipe: Recipe) {
   return recipe.image_source_url?.trim() || null;
+}
+
+function parseIsoDate(value?: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function canAutoResolveRecipeImage(recipe: Recipe) {
+  if (getRecipeImage(recipe)) return false;
+  if (recipe.source === "manual") return false;
+  const status = recipe.image_lookup_status;
+  if (status === null || status === undefined) return true;
+  if (status === "rate_limited" || status === "upstream_error") {
+    const retryAfter = parseIsoDate(recipe.image_lookup_retry_after);
+    return !retryAfter || retryAfter.getTime() <= Date.now();
+  }
+  return false;
 }
 
 function getRecipeSourceLabel(recipe: Recipe) {
@@ -499,22 +566,47 @@ function getRecipeTip(recipe: Recipe) {
 
 function RecipeVisualSurface({
   compact = false,
+  loading = false,
   recipe,
 }: {
   compact?: boolean;
+  loading?: boolean;
   recipe: Recipe;
 }) {
   const imageUrl = getRecipeImage(recipe);
   const imageReason = getRecipeImageReason(recipe);
   const imageCaption = getRecipeImageCaption(recipe);
 
-  if (imageUrl) {
+  if (imageUrl && !loading) {
     return (
       <img
         className="h-full w-full object-cover"
         src={imageUrl}
         alt={getRecipeAltText(recipe)}
       />
+    );
+  }
+
+  if (compact) {
+    return (
+      <div
+        aria-label={getRecipeAltText(recipe)}
+        className="relative flex h-full w-full overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(111,180,124,0.28),_transparent_52%),linear-gradient(145deg,_rgba(244,248,242,1),_rgba(227,241,230,1))]"
+        role="img"
+        title={loading ? "Estamos buscando una imagen real para esta receta." : getRecipeImageReason(recipe)}
+      >
+        <div className="absolute inset-0 bg-[linear-gradient(135deg,transparent_0,transparent_45%,rgba(31,37,34,0.04)_45%,rgba(31,37,34,0.04)_55%,transparent_55%,transparent_100%)]" />
+        <div className="relative z-10 flex h-full w-full items-center justify-center">
+          {loading ? (
+            <span className="inline-flex h-10 w-10 animate-spin rounded-full border-2 border-leaf/20 border-t-leaf" aria-hidden="true" />
+          ) : (
+            <div className="relative h-16 w-16 rounded-full border border-white/75 bg-white/70 shadow-soft">
+              <div className="absolute inset-3 rounded-full border border-leaf/30" />
+              <div className="absolute left-1/2 top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-leaf/35" />
+            </div>
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -528,15 +620,15 @@ function RecipeVisualSurface({
       <div className={`relative z-10 flex h-full w-full flex-col justify-between ${compact ? "p-4" : "p-6"}`}>
         <div className="flex items-center justify-between gap-3">
           <span className="rounded-lg border border-white/70 bg-white/80 px-3 py-1 text-xs font-semibold text-leaf shadow-soft">
-            {getRecipeImageBadge(recipe)}
+            {loading ? "Buscando imagen real" : getRecipeImageStatus(recipe)}
           </span>
         </div>
         <div>
           <p className={`${compact ? "line-clamp-3 text-sm" : "text-base"} font-semibold leading-6 text-ink`}>
-            {imageCaption}
+            {loading ? "Estamos consultando una pagina fuente y validando su imagen." : imageCaption}
           </p>
           <p className={`mt-3 ${compact ? "text-xs" : "text-sm"} leading-5 text-ink/70`}>
-            {imageReason}
+            {loading ? "El bloque de imagen se actualizara automaticamente cuando termine la busqueda." : imageReason}
           </p>
         </div>
       </div>
@@ -593,6 +685,19 @@ export default function Home() {
   const [recipeForm, setRecipeForm] = useState<RecipeEditForm>(() => buildEmptyRecipeForm());
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("Listo para planificar.");
+  const [menuGenerationFeedback, setMenuGenerationFeedback] = useState<MenuGenerationFeedback>({
+    phase: "idle",
+    message: "",
+    cooldownSeconds: null,
+  });
+  const [recipeImageAutoResolutionStarted, setRecipeImageAutoResolutionStarted] = useState(false);
+  const [recipeImageBatchFeedback, setRecipeImageBatchFeedback] = useState<RecipeImageBatchFeedback>({
+    phase: "idle",
+    message: "",
+    cooldownSeconds: null,
+    attemptedCount: 0,
+    remainingCount: 0,
+  });
   const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings, ingredients), [ingredients, preferenceSettings]);
   const usableIngredients = useMemo(
     () => ingredients.filter((ingredient) => !preferenceSettings.excludedIngredientIds.includes(ingredient.id)),
@@ -652,6 +757,40 @@ export default function Home() {
     });
   }, [ingredients]);
 
+  useEffect(() => {
+    if (menuGenerationFeedback.phase !== "rate_limited" || !menuGenerationFeedback.cooldownSeconds || menuGenerationFeedback.cooldownSeconds <= 0) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setMenuGenerationFeedback((current) => {
+        if (current.phase !== "rate_limited" || !current.cooldownSeconds || current.cooldownSeconds <= 0) {
+          return current;
+        }
+        return { ...current, cooldownSeconds: Math.max(current.cooldownSeconds - 1, 0) };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [menuGenerationFeedback.phase, menuGenerationFeedback.cooldownSeconds]);
+
+  useEffect(() => {
+    if (recipeImageBatchFeedback.phase !== "rate_limited" || !recipeImageBatchFeedback.cooldownSeconds || recipeImageBatchFeedback.cooldownSeconds <= 0) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setRecipeImageBatchFeedback((current) => {
+        if (current.phase !== "rate_limited" || !current.cooldownSeconds || current.cooldownSeconds <= 0) {
+          return current;
+        }
+        return { ...current, cooldownSeconds: Math.max(current.cooldownSeconds - 1, 0) };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [recipeImageBatchFeedback.phase, recipeImageBatchFeedback.cooldownSeconds]);
+
   const groupedMenu = useMemo(() => {
     const groups = new Map<number, MenuItem[]>();
     for (const item of menu?.items ?? []) {
@@ -705,9 +844,16 @@ export default function Home() {
   const plannedSlots = menu?.items.filter((item) => item.recipe).length ?? 0;
   const dashboardDays = groupedMenu;
   const currentMenuDayIndex = getCurrentMenuDayIndex(menu);
+  const isGeneratingMenu = menuGenerationFeedback.phase === "loading";
+  const generationCooldownActive =
+    menuGenerationFeedback.phase === "rate_limited" && (menuGenerationFeedback.cooldownSeconds ?? 0) > 0;
   const latestRecipes = recipes.slice(0, 4);
   const expiringIngredients = useMemo(() => sortIngredients(ingredients, "expiry_asc").slice(0, 4), [ingredients]);
   const recipeTags = ["Todas", ...Array.from(new Set(recipes.flatMap((recipe) => recipe.tags))).slice(0, 10)];
+  const pendingRecipeImageIds = useMemo(
+    () => recipes.filter(canAutoResolveRecipeImage).map((recipe) => recipe.id),
+    [recipes],
+  );
   const navItems: { id: Exclude<ViewId, "recipeDetail">; label: string; description: string }[] = [
     { id: "dashboard", label: "Dashboard", description: "Resumen" },
     { id: "menu", label: "Menu semanal", description: "Plan de 7 dias" },
@@ -731,6 +877,22 @@ export default function Home() {
           description: "Consulta completa y edicion preparada para recetario.",
         }
       : (navItems.find((item) => item.id === activeView) ?? navItems[0]);
+
+  useEffect(() => {
+    if (activeView !== "recipes") {
+      setRecipeImageAutoResolutionStarted(false);
+    }
+  }, [activeView]);
+
+  useEffect(() => {
+    if (activeView !== "recipes") return;
+    if (!aiStatus?.configured) return;
+    if (!pendingRecipeImageIds.length) return;
+    if (recipeImageAutoResolutionStarted) return;
+    if (recipeImageBatchFeedback.phase === "loading") return;
+    setRecipeImageAutoResolutionStarted(true);
+    void resolveRecipeImagesBatch(pendingRecipeImageIds.slice(0, 4));
+  }, [activeView, aiStatus?.configured, pendingRecipeImageIds, recipeImageBatchFeedback.phase, recipeImageAutoResolutionStarted]);
 
   function savePreferences() {
     setMessage("Preferencias guardadas para la proxima generacion.");
@@ -822,21 +984,68 @@ export default function Home() {
     }
   }
 
-  async function resolveRecipeImage(recipeId: string) {
+  function mergeResolvedRecipes(updatedRecipes: Recipe[]) {
+    if (!updatedRecipes.length) return;
+    const updatedById = new Map(updatedRecipes.map((recipe) => [recipe.id, recipe]));
+    setRecipes((current) => current.map((recipe) => updatedById.get(recipe.id) ?? recipe));
+    setMenu((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((item) => (item.recipe?.id ? { ...item, recipe: updatedById.get(item.recipe.id) ?? item.recipe } : item)),
+          }
+        : current,
+    );
+    if (selectedRecipeId && updatedById.has(selectedRecipeId)) {
+      setSelectedRecipeId(selectedRecipeId);
+    }
+  }
+
+  async function resolveRecipeImagesBatch(recipeIds?: string[]) {
+    if (!aiStatus?.configured) return null;
+    setRecipeImageBatchFeedback({
+      phase: "loading",
+      message: "Generando imagenes para las recetas nuevas. Estamos resolviendo paginas fuente y validando metadatos.",
+      cooldownSeconds: null,
+      attemptedCount: 0,
+      remainingCount: recipeIds?.length ?? pendingRecipeImageIds.length,
+    });
+
+    try {
+      const data = await api<ResolveRecipeImagesResponse>("/recipes/resolve-images", {
+        method: "POST",
+        body: JSON.stringify({ recipe_ids: recipeIds ?? [], limit: 4, force: false }),
+      });
+      mergeResolvedRecipes(data.updated_recipes);
+      setRecipeImageBatchFeedback({
+        phase: data.stopped_reason === "rate_limited" ? "rate_limited" : data.stopped_reason === "upstream_error" ? "error" : "success",
+        message: data.message,
+        cooldownSeconds: data.stopped_reason === "rate_limited" ? parseCooldownSeconds(data.message) : null,
+        attemptedCount: data.attempted_count,
+        remainingCount: data.remaining_pending_count,
+      });
+      return data;
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, "Error al resolver imagenes de recetas.");
+      setRecipeImageBatchFeedback({
+        phase: "error",
+        message: errorMessage,
+        cooldownSeconds: null,
+        attemptedCount: 0,
+        remainingCount: recipeIds?.length ?? pendingRecipeImageIds.length,
+      });
+      reportClientLog("error", "Error resolviendo imagenes en lote desde frontend", { action: "resolve_recipe_images_batch" }, error);
+      return null;
+    }
+  }
+
+  async function resolveRecipeImage(recipeId: string, force = false) {
     setResolvingRecipeImageId(recipeId);
     try {
-      const data = await api<Recipe>(`/recipes/${recipeId}/resolve-image`, {
+      const data = await api<Recipe>(`/recipes/${recipeId}/resolve-image${force ? "?force=true" : ""}`, {
         method: "POST",
       });
-      setRecipes((current) => current.map((recipe) => (recipe.id === data.id ? data : recipe)));
-      setMenu((current) =>
-        current
-          ? {
-              ...current,
-              items: current.items.map((item) => (item.recipe?.id === data.id ? { ...item, recipe: data } : item)),
-            }
-          : current,
-      );
+      mergeResolvedRecipes([data]);
       setSelectedRecipeId(data.id);
       setMessage(data.image_url ? "Imagen real resuelta para la receta." : getRecipeImageReason(data));
       reportClientLog("info", "Resolucion de imagen lanzada desde frontend", {
@@ -844,6 +1053,7 @@ export default function Home() {
         recipe_id: data.id,
         image_lookup_status: data.image_lookup_status,
         has_image_url: Boolean(data.image_url),
+        forced: force,
       });
       return data;
     } catch (error) {
@@ -947,6 +1157,15 @@ export default function Home() {
   }
 
   function requestGenerateMenu() {
+    if (generationCooldownActive) {
+      const waitMessage =
+        menuGenerationFeedback.cooldownSeconds && menuGenerationFeedback.cooldownSeconds > 0
+          ? `Gemini sigue saturado. Espera ${menuGenerationFeedback.cooldownSeconds} segundos antes de reintentar.`
+          : "Gemini sigue saturado temporalmente. Espera un momento antes de reintentar.";
+      setMessage(waitMessage);
+      return;
+    }
+
     if (ingredients.length === 0) {
       setGenerationGuard("empty");
       reportClientLog("warning", "Generacion bloqueada por nevera vacia", { action: "open_generation_guard" });
@@ -1001,6 +1220,17 @@ export default function Home() {
   async function generateMenu() {
     setLoading(true);
     setMessage("Generando menu semanal...");
+    setMenuGenerationFeedback({
+      phase: "loading",
+      message: "Generando menu semanal con IA. Estamos consultando Gemini y validando el resultado.",
+      cooldownSeconds: null,
+    });
+    reportClientLog("info", "Generacion de menu iniciada desde frontend", {
+      action: "generate_menu_started",
+      ingredient_count: ingredients.length,
+      usable_ingredient_count: usableIngredients.length,
+      ai_configured: aiStatus?.configured ?? false,
+    });
     try {
       const data = await api<WeeklyMenu>("/menus/generate", {
         method: "POST",
@@ -1009,6 +1239,11 @@ export default function Home() {
       setMenu(data);
       setActiveView("menu");
       setMessage("Menu semanal generado.");
+      setMenuGenerationFeedback({
+        phase: "success",
+        message: "Menu semanal generado correctamente.",
+        cooldownSeconds: null,
+      });
       reportClientLog("info", "Menu generado desde frontend", {
         action: "generate_menu",
         ai_model: data.ai_model,
@@ -1016,7 +1251,23 @@ export default function Home() {
       });
       await refreshRecipes();
     } catch (error) {
-      setMessage(getErrorMessage(error, "Error al generar menu."));
+      const errorMessage = getErrorMessage(error, "Error al generar menu.");
+      const statusCode = getApiErrorStatus(error);
+      const cooldownSeconds = parseCooldownSeconds(errorMessage);
+      setMessage(errorMessage);
+      if (statusCode === 503) {
+        setMenuGenerationFeedback({
+          phase: "rate_limited",
+          message: errorMessage,
+          cooldownSeconds,
+        });
+      } else {
+        setMenuGenerationFeedback({
+          phase: "error",
+          message: errorMessage,
+          cooldownSeconds: null,
+        });
+      }
       reportClientLog("error", "Error generando menu desde frontend", { action: "generate_menu" }, error);
     } finally {
       setLoading(false);
@@ -1138,16 +1389,22 @@ export default function Home() {
               </div>
               <button
                 className="rounded-lg bg-leaf px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={loading}
+                disabled={loading || generationCooldownActive}
                 onClick={requestGenerateMenu}
                 type="button"
               >
-                {loading ? "Trabajando..." : "Generar menu semanal"}
+                {isGeneratingMenu
+                  ? "Generando menu semanal..."
+                  : generationCooldownActive
+                    ? `Reintentar en ${menuGenerationFeedback.cooldownSeconds}s`
+                    : "Generar menu semanal"}
               </button>
             </div>
           </header>
 
           <div className="mx-auto max-w-7xl px-5 py-8">
+            <MenuGenerationBanner feedback={menuGenerationFeedback} />
+
             {activeView === "dashboard" ? (
               <DashboardView
                 currentMenuDayIndex={currentMenuDayIndex}
@@ -1165,6 +1422,15 @@ export default function Home() {
 
             {activeView === "menu" ? (
               <MenuView
+                generationButtonLabel={
+                  isGeneratingMenu
+                    ? "Generando menu semanal..."
+                    : generationCooldownActive
+                      ? `Reintentar en ${menuGenerationFeedback.cooldownSeconds}s`
+                      : "Regenerar menu"
+                }
+                generationDisabled={loading || generationCooldownActive}
+                generationInProgress={isGeneratingMenu}
                 groupedMenu={groupedMenu}
                 hasIngredients={ingredients.length > 0}
                 loading={loading}
@@ -1204,6 +1470,7 @@ export default function Home() {
 
             {activeView === "recipes" ? (
               <RecipesView
+                imageBatchFeedback={recipeImageBatchFeedback}
                 filteredRecipes={filteredRecipes}
                 difficultyFilter={recipeDifficultyFilter}
                 loading={loading}
@@ -1213,6 +1480,7 @@ export default function Home() {
                   setRecipeForm(buildEmptyRecipeForm());
                   setRecipeModalOpen(true);
                 }}
+                onResolveMoreImages={() => void resolveRecipeImagesBatch(pendingRecipeImageIds.slice(0, 4))}
                 onToggleFavorite={toggleFavoriteRecipe}
                 recipeFilter={recipeFilter}
                 recipeTags={recipeTags}
@@ -1395,6 +1663,61 @@ function GenerationGuardModal({
           >
             Cancelar
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MenuGenerationBanner({ feedback }: { feedback: MenuGenerationFeedback }) {
+  if (feedback.phase === "idle") return null;
+
+  const tone =
+    feedback.phase === "loading"
+      ? "border-leaf/25 bg-white"
+      : feedback.phase === "success"
+        ? "border-leaf/30 bg-mint/30"
+        : feedback.phase === "rate_limited"
+          ? "border-yolk/40 bg-yolk/10"
+          : "border-tomato/30 bg-tomato/5";
+
+  const title =
+    feedback.phase === "loading"
+      ? "Generando menu semanal..."
+      : feedback.phase === "success"
+        ? "Menu semanal actualizado"
+        : feedback.phase === "rate_limited"
+          ? feedback.cooldownSeconds && feedback.cooldownSeconds > 0
+            ? `Gemini esta saturado. Reintento disponible en ${feedback.cooldownSeconds}s`
+            : "Gemini sigue saturado temporalmente"
+          : "No se pudo generar el menu semanal";
+
+  const indicator =
+    feedback.phase === "loading" ? (
+      <span className="mt-1 inline-flex h-4 w-4 animate-spin rounded-full border-2 border-leaf/25 border-t-leaf" aria-hidden="true" />
+    ) : (
+      <span
+        className={`mt-1 inline-flex h-4 w-4 rounded-full ${
+          feedback.phase === "success"
+            ? "bg-leaf"
+            : feedback.phase === "rate_limited"
+              ? "bg-yolk"
+              : "bg-tomato"
+        }`}
+        aria-hidden="true"
+      />
+    );
+
+  return (
+    <div aria-live="polite" className={`mb-6 rounded-lg border p-4 shadow-soft ${tone}`}>
+      <div className="flex items-start gap-3">
+        {indicator}
+        <div className="min-w-0">
+          <p className="font-semibold text-ink">{title}</p>
+          <p className="mt-1 text-sm leading-6 text-ink/75">{feedback.message}</p>
+          {feedback.phase === "loading" ? (
+            <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-leaf">Esperando respuesta del modelo y validando el menu</p>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1938,6 +2261,9 @@ function DashboardView({
 }
 
 function MenuView({
+  generationButtonLabel,
+  generationDisabled,
+  generationInProgress,
   groupedMenu,
   hasIngredients,
   loading,
@@ -1949,6 +2275,9 @@ function MenuView({
   selectedRecipes,
   setSelectedRecipes,
 }: {
+  generationButtonLabel: string;
+  generationDisabled: boolean;
+  generationInProgress: boolean;
   groupedMenu: [number, MenuItem[]][];
   hasIngredients: boolean;
   loading: boolean;
@@ -1970,14 +2299,24 @@ function MenuView({
             {menu ? `Semana del ${menu.week_start_date}` : "Genera tu primera propuesta."}
           </p>
         </div>
-        <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onGenerate} type="button">
-          {loading ? "Trabajando..." : "Regenerar menu"}
+        <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={generationDisabled} onClick={onGenerate} type="button">
+          {generationButtonLabel}
         </button>
       </div>
 
       {!menu ? (
         <div className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
-          {hasIngredients ? (
+          {generationInProgress ? (
+            <div className="flex items-start gap-3">
+              <span className="mt-1 inline-flex h-5 w-5 animate-spin rounded-full border-2 border-leaf/25 border-t-leaf" aria-hidden="true" />
+              <div>
+                <p className="font-semibold text-ink">Generando menu semanal...</p>
+                <p className="mt-2 text-sm leading-6 text-ink/70">
+                  Estamos consultando Gemini y validando los platos para completar los 14 huecos de la semana.
+                </p>
+              </div>
+            </div>
+          ) : hasIngredients ? (
             <p>Genera una primera semana usando los ingredientes guardados en la nevera.</p>
           ) : (
             <p>No has introducido ingredientes todavia. Pulsa "Generar menu semanal" para ver las opciones disponibles.</p>
@@ -2246,12 +2585,14 @@ function IngredientsView({
 }
 
 function RecipesView({
+  imageBatchFeedback,
   difficultyFilter,
   filteredRecipes,
   loading,
   onDeleteRecipe,
   onOpenRecipe,
   onOpenCreateRecipe,
+  onResolveMoreImages,
   onToggleFavorite,
   recipeFilter,
   recipeTags,
@@ -2263,12 +2604,14 @@ function RecipesView({
   timeFilter,
   totalRecipes,
 }: {
+  imageBatchFeedback: RecipeImageBatchFeedback;
   difficultyFilter: string;
   filteredRecipes: Recipe[];
   loading: boolean;
   onDeleteRecipe: (recipeId: string) => void;
   onOpenRecipe: (recipe: Recipe) => void;
   onOpenCreateRecipe: () => void;
+  onResolveMoreImages: () => void;
   onToggleFavorite: (recipe: Recipe, event?: { stopPropagation: () => void }) => void;
   recipeFilter: string;
   recipeTags: string[];
@@ -2419,6 +2762,63 @@ function RecipesView({
         ) : null}
       </div>
 
+      {imageBatchFeedback.phase !== "idle" ? (
+        <div
+          className={`rounded-lg border p-4 shadow-soft ${
+            imageBatchFeedback.phase === "loading"
+              ? "border-leaf/25 bg-white"
+              : imageBatchFeedback.phase === "success"
+                ? "border-leaf/30 bg-mint/30"
+                : imageBatchFeedback.phase === "rate_limited"
+                  ? "border-yolk/40 bg-yolk/10"
+                  : "border-tomato/30 bg-tomato/5"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              {imageBatchFeedback.phase === "loading" ? (
+                <span className="mt-1 inline-flex h-4 w-4 animate-spin rounded-full border-2 border-leaf/25 border-t-leaf" aria-hidden="true" />
+              ) : (
+                <span
+                  className={`mt-1 inline-flex h-4 w-4 rounded-full ${
+                    imageBatchFeedback.phase === "success"
+                      ? "bg-leaf"
+                      : imageBatchFeedback.phase === "rate_limited"
+                        ? "bg-yolk"
+                        : "bg-tomato"
+                  }`}
+                  aria-hidden="true"
+                />
+              )}
+              <div>
+                <p className="font-semibold text-ink">
+                  {imageBatchFeedback.phase === "loading"
+                    ? "Generando imagenes para recetas nuevas..."
+                    : imageBatchFeedback.phase === "rate_limited"
+                      ? imageBatchFeedback.cooldownSeconds
+                        ? `Resolucion pausada. Reintento disponible en ${imageBatchFeedback.cooldownSeconds}s`
+                        : "Resolucion pausada temporalmente"
+                      : imageBatchFeedback.phase === "success"
+                        ? "Imagenes actualizadas"
+                        : "No se pudieron actualizar las imagenes"}
+                </p>
+                <p className="mt-1 text-sm leading-6 text-ink/75">{imageBatchFeedback.message}</p>
+              </div>
+            </div>
+            {imageBatchFeedback.phase !== "loading" && imageBatchFeedback.remainingCount > 0 ? (
+              <button
+                className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf disabled:opacity-60"
+                disabled={loading || imageBatchFeedback.phase === "rate_limited"}
+                onClick={onResolveMoreImages}
+                type="button"
+              >
+                Resolver mas
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {filteredRecipes.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">
           {totalRecipes === 0
@@ -2449,17 +2849,23 @@ function RecipesView({
                     <RecipeVisualSurface compact recipe={recipe} />
                   </div>
                   <div className="absolute inset-0 bg-ink/0 transition duration-300 group-hover:bg-ink/10" />
-                  <span className="absolute left-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-leaf shadow-soft transition duration-200 group-hover:-translate-y-0.5">
-                    {getRecipeSourceLabel(recipe)}
-                  </span>
-                  <span className={`absolute right-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold shadow-soft transition duration-200 group-hover:-translate-y-0.5 ${recipe.is_favorite ? "text-tomato" : "text-ink/65"}`}>
-                    {recipe.is_favorite ? "Favorita" : "Guardada"}
-                  </span>
+                  {recipe.is_favorite ? (
+                    <span
+                      aria-label="Receta favorita"
+                      className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/92 text-lg text-tomato shadow-soft transition duration-200 group-hover:-translate-y-0.5"
+                      title="Receta favorita"
+                    >
+                      ♥
+                    </span>
+                  ) : null}
                 </div>
 
                 <div className="p-5 transition duration-200 group-hover:bg-paper/40">
                   <div className="flex items-start justify-between gap-3">
                     <div>
+                      {recipe.source === "manual" ? (
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-leaf">Receta propia</p>
+                      ) : null}
                       <h3 className="text-xl font-semibold leading-tight">{recipe.title}</h3>
                       <p className="mt-2 line-clamp-2 text-sm leading-6 text-ink/70">{recipe.description}</p>
                     </div>
@@ -2498,7 +2904,7 @@ function RecipesView({
                       }}
                       type="button"
                     >
-                      Editar
+                      Ver receta
                     </button>
                     <button
                       className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
@@ -2548,7 +2954,7 @@ function RecipeDetailView({
   imageResolutionPending: boolean;
   loading: boolean;
   onBack: () => void;
-  onResolveRecipeImage: (recipeId: string) => Promise<Recipe | null>;
+  onResolveRecipeImage: (recipeId: string, force?: boolean) => Promise<Recipe | null>;
   onUpdateRecipe: (recipeId: string, payload: RecipeUpdatePayload) => Promise<Recipe | null>;
   onUseInMenu: (recipe: Recipe) => void;
   recipe: Recipe | null;
@@ -2562,14 +2968,16 @@ function RecipeDetailView({
     setIsEditing(false);
     setLocalError("");
     setAutoResolveRequestedFor(null);
+  }, [recipe?.id]);
+
+  useEffect(() => {
     setDraft(recipe ? buildRecipeEditForm(recipe) : null);
   }, [recipe]);
 
   useEffect(() => {
     if (!recipe || !aiEnabled || imageResolutionPending) return;
     if (autoResolveRequestedFor === recipe.id) return;
-    if (getRecipeImage(recipe)) return;
-    if (recipe.image_lookup_status !== null && recipe.image_lookup_status !== undefined) return;
+    if (!canAutoResolveRecipeImage(recipe)) return;
     setAutoResolveRequestedFor(recipe.id);
     void onResolveRecipeImage(recipe.id);
   }, [aiEnabled, autoResolveRequestedFor, imageResolutionPending, onResolveRecipeImage, recipe]);
@@ -2590,9 +2998,20 @@ function RecipeDetailView({
   const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
   const canResolveImage = aiEnabled && !getRecipeImage(recipe) && !isEditing;
   const imageActionLabel =
-    recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found"
+    recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found" || recipe.image_lookup_status === "upstream_error" || recipe.image_lookup_status === "rate_limited"
       ? "Reintentar imagen real"
       : "Buscar imagen real";
+  const detailImageStatus = imageResolutionPending ? "Buscando imagen real" : getRecipeImageStatus(recipe);
+  const detailImageCaption = imageResolutionPending
+    ? "Estamos buscando una imagen real a partir de una pagina fuente relevante para esta receta."
+    : getRecipeImageCaption(recipe);
+  const detailImageAltText = imageResolutionPending
+    ? "Buscando una imagen real para esta receta."
+    : getRecipeAltText(recipe);
+  const detailImageReason = imageResolutionPending
+    ? "Consultando la pagina fuente propuesta por la IA y validando que la imagen sea real y reutilizable."
+    : getRecipeImageReason(recipe);
+  const detailImageSourceUrl = imageResolutionPending ? null : getRecipeImageSourceUrl(recipe);
 
   function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
     setDraft((current) =>
@@ -2824,7 +3243,7 @@ function RecipeDetailView({
         <div className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-line bg-white shadow-soft">
             <div className="h-80 w-full">
-              <RecipeVisualSurface recipe={recipe} />
+              <RecipeVisualSurface loading={imageResolutionPending} recipe={recipe} />
             </div>
           </div>
 
@@ -2862,13 +3281,13 @@ function RecipeDetailView({
               <h3 className="text-xl font-semibold">Imagen de la receta</h3>
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <span className="text-xs font-semibold uppercase text-ink/55">
-                  {getRecipeImageStatus(recipe)}
+                  {detailImageStatus}
                 </span>
                 {canResolveImage ? (
                   <button
                     className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={imageResolutionPending || loading}
-                    onClick={() => void onResolveRecipeImage(recipe.id)}
+                    onClick={() => void onResolveRecipeImage(recipe.id, true)}
                     type="button"
                   >
                     {imageResolutionPending ? "Buscando..." : imageActionLabel}
@@ -2876,15 +3295,15 @@ function RecipeDetailView({
                 ) : null}
               </div>
             </div>
-            <p className="mt-4 text-sm leading-6 text-ink/75">{getRecipeImageCaption(recipe)}</p>
+            <p className="mt-4 text-sm leading-6 text-ink/75">{detailImageCaption}</p>
             <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Texto alternativo</p>
-            <p className="mt-1 text-sm leading-6 text-ink/70">{getRecipeAltText(recipe)}</p>
-            {getRecipeImageSourceUrl(recipe) ? (
+            <p className="mt-1 text-sm leading-6 text-ink/70">{detailImageAltText}</p>
+            {detailImageSourceUrl ? (
               <>
                 <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Fuente</p>
                 <a
                   className="mt-1 inline-flex text-sm font-semibold text-leaf hover:text-ink"
-                  href={getRecipeImageSourceUrl(recipe) || "#"}
+                  href={detailImageSourceUrl || "#"}
                   rel="noreferrer"
                   target="_blank"
                 >
@@ -2893,7 +3312,7 @@ function RecipeDetailView({
               </>
             ) : null}
             <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Estado</p>
-            <p className="mt-1 text-sm leading-6 text-ink/70">{getRecipeImageReason(recipe)}</p>
+            <p className="mt-1 text-sm leading-6 text-ink/70">{detailImageReason}</p>
           </div>
 
           <div className="rounded-lg border border-leaf/20 bg-leaf/5 p-5">
