@@ -68,7 +68,6 @@ Este documento convierte la prueba tecnica en una lista operativa para revisar l
 - [x] FastAPI registra excepciones HTTP y errores no controlados.
 - [x] Integracion Gemini registra fallback o fallo de API externa.
 - [x] Frontend reporta errores y eventos criticos mediante `POST /logs`.
-- [ ] Revisar en DBeaver `public.system_logs` durante la demo si hace falta explicar trazabilidad.
 
 ## Comandos de verificacion
 
@@ -96,6 +95,3 @@ npm run build
 npm run dev
 ```
 
-## Decision sobre claves de Gemini
-
-No se incluye una clave compartida en el repositorio. Es mejor que cada evaluador cree su propia clave gratuita en Google AI Studio y la ponga en `.env`, porque una clave commiteada puede consumir cuota, generar costes si hay billing y exponer datos del proyecto asociado.
