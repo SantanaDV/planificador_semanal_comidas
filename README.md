@@ -597,6 +597,23 @@ Obligó a separar correctamente el estado de carga del estado previo, a respetar
 **Qué se ajustó después:**
 El copy de la UI se hizo más específico: ahora habla de “resolucion de imagenes” y de saturacion de Gemini, en lugar de mostrar un error genérico que parecía romper la receta completa.
 
+---
+
+## 13. Desacoplamiento de texto e imagen para la IA
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Separar internamente la generacion textual del menu de la resolucion de imagenes, sin cambiar aun el comportamiento externo del producto.
+
+**Prompt usado:**
+
+> Ejecuta una Fase 1 de desacoplamiento con el menor riesgo posible: crea `TextProvider`, `ImageProvider`, `TextGenerationService` e `ImageResolutionService`, encapsula el fallback actual como proveedor reutilizable y haz que `main.py` deje de depender directamente del modulo mixto actual, sin cambiar rutas ni romper el frontend.
+
+**Por qué funcionó:**
+Permitio preparar la arquitectura para introducir un proveedor local de texto en la siguiente fase sin rehacer la API ni tocar todavia Docker u Ollama.
+
+**Qué se ajustó después:**
+La configuracion pasa a distinguir `text_ai_provider` e `image_ai_provider`; Gemini sigue igual para imagenes y el texto mantiene el comportamiento actual hasta enchufar el proveedor local.
+
 
 # Estructura del video y presentación
 

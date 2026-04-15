@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import case, inspect, select, text
 from sqlalchemy.orm import Session
 
-from . import ai
 from .config import settings
 from .database import Base, engine, get_session
 from .demo_data import DEFAULT_INGREDIENT_CATEGORIES, DEMO_INGREDIENTS
@@ -34,6 +33,8 @@ from .schemas import (
     UseRecipeRequest,
     WeeklyMenuOut,
 )
+from .services.image_resolution_service import get_image_resolution_service
+from .services.text_generation_service import WeeklyMenuResolutionError, get_text_generation_service
 
 DEMO_USER_ID = "demo-user"
 MIN_INGREDIENTS_FOR_MENU = 5
@@ -65,6 +66,8 @@ PANTRY_STRUCTURAL_BASICS = [
 PANTRY_BASICS = [*PANTRY_SUPPORT_BASICS, *PANTRY_STRUCTURAL_BASICS]
 MAX_PANTRY_INGREDIENTS_PER_RECIPE = 3
 MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE = 1
+text_generation_service = get_text_generation_service()
+image_resolution_service = get_image_resolution_service()
 
 
 @asynccontextmanager
@@ -83,6 +86,8 @@ async def lifespan(_app: FastAPI):
         "Aplicacion iniciada",
         {
             "service": "api",
+            "text_ai_provider": settings.text_ai_provider,
+            "image_ai_provider": settings.image_ai_provider,
             "gemini_model": settings.gemini_model,
             "gemini_configured": settings.has_valid_gemini_api_key,
         },
@@ -134,16 +139,13 @@ def health() -> dict[str, str]:
 
 @app.get("/ai/status", response_model=AiStatusOut)
 def ai_status() -> AiStatusOut:
-    configured = settings.has_valid_gemini_api_key
+    configured = text_generation_service.is_configured
     return AiStatusOut(
-        model=settings.gemini_model,
+        provider=text_generation_service.provider_name,
+        model=text_generation_service.model_name,
         configured=configured,
-        mode="ai" if configured else "fallback",
-        message=(
-            "Gemini configurado. El menu semanal se genera con IA real, prioriza la nevera y admite una despensa basica limitada."
-            if configured
-            else "Gemini no esta configurado. La generacion usara fallback local de demo."
-        ),
+        mode=text_generation_service.mode,
+        message=text_generation_service.status_message(image_provider_name=image_resolution_service.provider_name),
     )
 
 
@@ -340,13 +342,13 @@ def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), ses
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
 
-    if not settings.has_valid_gemini_api_key:
+    if not image_resolution_service.is_configured:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
 
     if not force and _should_skip_image_resolution(recipe):
         return recipe
 
-    image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+    image_payload = image_resolution_service.resolve_recipe_image(_recipe_to_dict(recipe))
     _apply_image_lookup_payload(recipe, image_payload)
 
     session.commit()
@@ -366,7 +368,7 @@ def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), ses
 
 @app.post("/recipes/resolve-images", response_model=ResolveRecipeImagesOut)
 def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session = Depends(get_session)) -> ResolveRecipeImagesOut:
-    if not settings.has_valid_gemini_api_key:
+    if not image_resolution_service.is_configured:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
 
     query = select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc())
@@ -387,7 +389,7 @@ def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session 
             skipped_count += 1
             continue
 
-        image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+        image_payload = image_resolution_service.resolve_recipe_image(_recipe_to_dict(recipe))
         _apply_image_lookup_payload(recipe, image_payload)
         updated_recipes.append(recipe)
         attempted_count += 1
@@ -503,8 +505,8 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         compatible_saved_recipes,
     )
     try:
-        generated = ai.generate_weekly_menu(ingredients, generation_context)
-    except ai.WeeklyMenuResolutionError as exc:
+        generated = text_generation_service.generate_weekly_menu(ingredients, generation_context)
+    except WeeklyMenuResolutionError as exc:
         error_type = str(exc.context.get("error_type") or "").strip()
         cooldown_seconds = exc.context.get("cooldown_seconds")
         record_log(
@@ -575,14 +577,14 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             "pantry_basics": PANTRY_BASICS,
         },
         generated_from_ingredients=[ingredient["name"] for ingredient in ingredients if ingredient.get("name")],
-        ai_model=generated.get("ai_model", settings.gemini_model),
+        ai_model=generated.get("ai_model", text_generation_service.model_name),
         notes=generated.get("notes", ""),
     )
     session.add(menu)
     session.flush()
 
     for index, item_payload in enumerate(generated["items"][:14]):
-        normalized = ai.normalize_menu_item(item_payload, index, ingredients)
+        normalized = text_generation_service.normalize_menu_item(item_payload, index, ingredients)
         recipe = _create_recipe_from_payload(session, normalized["recipe"], source=menu.ai_model)
         session.flush()
         session.add(
@@ -672,7 +674,7 @@ def replace_menu_item(
         compatible_saved_recipes,
     )
     try:
-        generated = ai.generate_replacement(
+        generated = text_generation_service.generate_replacement(
             ingredients,
             generation_context,
             item.day_index,
@@ -698,7 +700,7 @@ def replace_menu_item(
     recipe = _create_recipe_from_payload(
         session,
         generated["recipe"],
-        source=generated.get("ai_model") or (settings.gemini_model if settings.has_valid_gemini_api_key else "fallback-local"),
+        source=generated.get("ai_model") or text_generation_service.model_name,
     )
     item.recipe_id = recipe.id
     item.recipe = recipe
