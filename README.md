@@ -1,41 +1,41 @@
 # Planificador semanal de comidas con IA
 
-Aplicacion web para crear menus semanales a partir de ingredientes disponibles, preferencias e historial de recetas. El MVP usa Next.js, FastAPI, PostgreSQL, Docker Compose y Gemini configurable. Para probar IA real necesitas tu propia clave de Gemini; si no la configuras, el backend usa un fallback local para que la demo siga funcionando.
+Aplicación web para crear menús semanales a partir de ingredientes disponibles, preferencias e historial de recetas. El MVP usa Next.js, FastAPI, PostgreSQL, Docker Compose y Gemini configurable. Para probar IA real necesitas tu propia clave de Gemini; si no la configuras, el backend usa un fallback local para que la demo siga funcionando.
 
-## Nota de decision para la entrega
+## Nota de decisión para la entrega
 
-Durante el desarrollo se exploro una integracion local con Ollama para que la generacion textual del menu no dependiera de un servicio externo. El experimento se completo a nivel arquitectonico, pero no se adopto como camino principal para esta entrega porque la generacion semanal completa no alcanzo un nivel suficientemente estable ni una latencia razonable en CPU para la demo final.
+Durante el desarrollo se exploró una integración local con Ollama para que la generación textual del menú no dependiera de un servicio externo. El experimento se completó a nivel arquitectónico, pero no se adoptó como camino principal para esta entrega porque la generación semanal completa no alcanzó un nivel suficientemente estable ni una latencia razonable en CPU para la demo final.
 
-La entrega final prioriza por tanto la version mas estable y defendible del producto. El trabajo experimental queda preservado en una rama separada del repositorio: `experiment/local-ollama-menu`.
+La entrega final prioriza por tanto la versión más estable y defendible del producto. El trabajo experimental queda preservado en una rama separada del repositorio: `experiment/local-ollama-menu`.
 
 ## Funcionalidad MVP
 
 - Usuario demo sin login.
-- Alta y eliminacion de ingredientes con categoria persistida, cantidad y fecha de caducidad.
-- Generacion de menu semanal con comida y cena de lunes a domingo.
+- Alta y eliminación de ingredientes con categoría persistida, cantidad y fecha de caducidad.
+- Generación de menú semanal con comida y cena de lunes a domingo.
 - Preferencias estructuradas con ingredientes excluidos seleccionados desde la nevera real.
-- Guardado automatico de recetas generadas.
-- Sustitucion de platos del menu.
-- Repeticion de recetas guardadas en un hueco del menu.
-- Recetario con filtro, eliminacion, favoritas y creacion manual de recetas.
+- Guardado automático de recetas generadas.
+- Sustitución de platos del menú.
+- Repetición de recetas guardadas en un hueco del menú.
+- Recetario con filtro, eliminación, favoritas y creación manual de recetas.
 - Detalle editable de receta con foto, ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
-- Resolucion progresiva de imagen real para recetas, con validacion minima de `image_url`, fuente, candidatos cacheados y estado de busqueda.
-- La vista `Recetas` puede completar algunas imagenes automaticamente, pero solo sobre un pequeno lote de recetas visibles y con una cola controlada.
-- Explicacion breve de por que se eligio cada plato.
-- Estado vacio de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
-- Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
+- Resolución progresiva de imagen real para recetas, con validación mínima de `image_url`, fuente, candidatos cacheados y estado de búsqueda.
+- La vista `Recetas` puede completar algunas imágenes automáticamente, pero solo sobre un pequeño lote de recetas visibles y con una cola controlada.
+- Explicación breve de por qué se eligió cada plato.
+- Estado vacío de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
+- Logging transversal en base de datos para eventos de backend, frontend, IA y planificación.
 
 ## Requisitos
 
 - Docker Desktop con Docker Compose.
-- Integracion WSL activada si se ejecuta desde WSL en Windows.
+- Integración WSL activada si se ejecuta desde WSL en Windows.
 - Node.js 20.9+ si ejecutas el frontend sin Docker.
 - Python 3.12 si ejecutas el backend sin Docker.
-- Clave de Gemini API para probar generacion real con `gemini-2.5-flash-lite`.
+- Clave de Gemini API para probar generación real con `gemini-2.5-flash-lite`.
 
-## Arranque rapido con Docker
+## Arranque rápido con Docker
 
-Este es el flujo recomendado para levantar el proyecto y comprobar que la integracion con Gemini esta bien configurada.
+Este es el flujo recomendado para levantar el proyecto y comprobar que la integración con Gemini está bien configurada.
 
 ### 1. Preparar variables de entorno
 
@@ -56,36 +56,36 @@ Copy-Item .env.example .env
 Paso a paso oficial de Google AI for Developers:
 
 1. Entra en Google AI Studio: https://aistudio.google.com/
-2. Inicia sesion con tu cuenta de Google.
-3. Si es tu primera vez, acepta los terminos de servicio cuando te los pida AI Studio.
-4. Abre la pagina de claves: https://aistudio.google.com/apikey
+2. Inicia sesión con tu cuenta de Google.
+3. Si es tu primera vez, acepta los términos de servicio cuando te los pida AI Studio.
+4. Abre la página de claves: https://aistudio.google.com/apikey
 5. Si AI Studio ya te muestra un proyecto y una clave, puedes usar esa clave.
 6. Si no ves un proyecto disponible:
    - abre `Dashboard`
    - entra en `Projects`
-   - si eres usuario nuevo, AI Studio puede haberte creado un proyecto por defecto automaticamente
-   - si ya tenias proyectos de Google Cloud, usa `Import projects` y busca tu proyecto por nombre o `project ID`
+   - si eres usuario nuevo, AI Studio puede haberte creado un proyecto por defecto automáticamente
+   - si ya tenías proyectos de Google Cloud, usa `Import projects` y busca tu proyecto por nombre o `project ID`
 7. Vuelve a `API Keys` y crea una clave en el proyecto elegido.
-8. Copia la clave y guardala localmente. No se vuelve a publicar desde este repositorio.
+8. Copia la clave y guárdala localmente. No se vuelve a publicar desde este repositorio.
 
 Casos reales a tener en cuenta:
 
-- Si el boton de crear clave aparece deshabilitado o ves un mensaje del tipo `You do not have permission to create a key in this project`, el problema no es del proyecto: faltan permisos en Google Cloud sobre ese proyecto.
-- Si no tienes permisos sobre un proyecto corporativo u organizacional, la salida mas simple para esta prueba es crear o usar un proyecto personal que controles.
-- Google AI Studio muestra y gestiona las claves desde su propia pagina de `API Keys`, pero para administracion avanzada o restricciones puedes ir despues a Google Cloud Console.
+- Si el botón de crear clave aparece deshabilitado o ves un mensaje del tipo `You do not have permission to create a key in this project`, el problema no es del proyecto: faltan permisos en Google Cloud sobre ese proyecto.
+- Si no tienes permisos sobre un proyecto corporativo u organizacional, la salida más simple para esta prueba es crear o usar un proyecto personal que controles.
+- Google AI Studio muestra y gestiona las claves desde su propia página de `API Keys`, pero para administración avanzada o restricciones puedes ir después a Google Cloud Console.
 
 ### 3. Pegar la clave en `.env`
 
-Abre `.env` y deja, como minimo:
+Abre `.env` y deja, como mínimo:
 
 ```bash
 GEMINI_API_KEY=tu_clave_real_aqui
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
 
-### 4. Levantar la aplicacion
+### 4. Levantar la aplicación
 
-Esto se debe arrancar desde donde tengas el docker-commpose.yml.
+Esto se debe arrancar desde donde tengas el `docker-compose.yml`.
 
 ```bash
 docker compose up --build
@@ -97,7 +97,7 @@ Docker arranca:
 - backend FastAPI en `localhost:8000`
 - frontend Next.js en `localhost:3000`
 
-El frontend se ejecuta con `next start` sobre una build de produccion. Si quieres recarga en caliente, usa la ejecucion sin Docker.
+El frontend se ejecuta con `next start` sobre una build de producción. Si quieres recarga en caliente, usa la ejecución sin Docker.
 
 ### 5. Verificar que todo ha arrancado
 
@@ -117,7 +117,7 @@ Respuesta esperada:
 curl http://localhost:8000/ai/status
 ```
 
-Si la clave esta bien cargada, deberias ver algo parecido a:
+Si la clave está bien cargada, deberías ver algo parecido a:
 
 ```json
 {
@@ -132,8 +132,8 @@ Si la clave esta bien cargada, deberias ver algo parecido a:
 
 Si `configured` sale `false`, revisa:
 
-- que la clave esta realmente escrita en `.env`
-- que has levantado Docker despues de editar `.env`
+- que la clave está realmente escrita en `.env`
+- que has levantado Docker después de editar `.env`
 - que no hay espacios o comillas sobrantes en `GEMINI_API_KEY`
 
 ### 7. Abrir la app
@@ -146,11 +146,11 @@ Si `configured` sale `false`, revisa:
 
 1. Entra en `Ingredientes`.
 2. Si no quieres cargar ingredientes a mano, usa el flujo de ingredientes de prueba desde la UI cuando el generador te lo ofrezca.
-3. Pulsa `Generar menu semanal`.
-4. Si Gemini esta bien configurado y con cuota disponible, el backend intentara generar el menu con IA real.
-5. Si no hay clave valida, la app te avisara antes y podras continuar con modo demo local.
+3. Pulsa `Generar menú semanal`.
+4. Si Gemini está bien configurado y con cuota disponible, el backend intentará generar el menú con IA real.
+5. Si no hay clave válida, la app te avisará antes y podrás continuar con modo demo local.
 
-## Ejecucion local sin Docker
+## Ejecución local sin Docker
 
 Backend:
 
@@ -180,9 +180,9 @@ npm run dev
 
 | Variable                | Uso                                                         | Valor por defecto            |
 | ----------------------- | ----------------------------------------------------------- | ---------------------------- |
-| `GEMINI_API_KEY`      | Clave local de Gemini API. Si falta, se usa fallback local. | vacio                        |
+| `GEMINI_API_KEY`      | Clave local de Gemini API. Si falta, se usa fallback local. | vacío                        |
 | `GEMINI_MODEL`        | Modelo usado para `generateContent`.                      | `gemini-2.5-flash-lite`    |
-| `DATABASE_URL`        | Conexion SQLAlchemy del backend.                            | SQLite local fuera de Docker |
+| `DATABASE_URL`        | Conexión SQLAlchemy del backend.                            | SQLite local fuera de Docker |
 | `NEXT_PUBLIC_API_URL` | URL de la API para el navegador.                            | `http://localhost:8000`    |
 
 ## Problemas habituales al crear o usar la clave Gemini
@@ -191,12 +191,12 @@ npm run dev
 
 Suele deberse a uno de estos casos:
 
-- `.env` no existe o no se copio desde `.env.example`
-- la clave no se pego realmente en `GEMINI_API_KEY`
-- editaste `.env` despues de levantar Docker y no reconstruiste
-- hay espacios, comillas o saltos de linea extra en la clave
+- `.env` no existe o no se copió desde `.env.example`
+- la clave no se pegó realmente en `GEMINI_API_KEY`
+- editaste `.env` después de levantar Docker y no reconstruiste
+- hay espacios, comillas o saltos de línea extra en la clave
 
-Solucion:
+Solución:
 
 ```bash
 docker compose up --build
@@ -205,9 +205,9 @@ curl http://localhost:8000/ai/status
 
 ### No puedes crear la clave en Google AI Studio
 
-Segun la documentacion oficial de Google, suele deberse a permisos insuficientes sobre el proyecto de Google Cloud asociado.
+Según la documentación oficial de Google, suele deberse a permisos insuficientes sobre el proyecto de Google Cloud asociado.
 
-Soluciones practicas para esta prueba:
+Soluciones prácticas para esta prueba:
 
 - usar un proyecto personal
 - importar manualmente el proyecto correcto desde `Dashboard > Projects > Import projects`
@@ -218,10 +218,10 @@ Soluciones practicas para esta prueba:
 Puede ocurrir por:
 
 - cuota o rate limit del plan disponible
-- saturacion temporal del proveedor
+- saturación temporal del proveedor
 - clave bloqueada o filtrada
 
-La app registra estos casos en `system_logs` y distingue entre error, saturacion y fallback. Si necesitas revisar trazas:
+La app registra estos casos en `system_logs` y distingue entre error, saturación y fallback. Si necesitas revisar trazas:
 
 ```bash
 curl "http://localhost:8000/logs?module=ai&limit=20"
@@ -233,12 +233,12 @@ La app guarda logs estructurados en la tabla `system_logs`. Cada registro incluy
 
 - `level`: `info`, `warning` o `error`.
 - `module`: origen del evento, por ejemplo `frontend`, `api`, `backend`, `database`, `ai` o `menu_planning`.
-- `message`: descripcion corta y legible.
-- `context`: JSON con datos utiles para depurar, sin secretos.
-- `stack_trace`: detalle tecnico opcional para errores.
+- `message`: descripción corta y legible.
+- `context`: JSON con datos útiles para depurar, sin secretos.
+- `stack_trace`: detalle técnico opcional para errores.
 - `created_at`: fecha y hora del evento.
 
-Endpoints utiles:
+Endpoints útiles:
 
 ```bash
 curl http://localhost:8000/logs
@@ -247,20 +247,20 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 
 ## Flujo de demo
 
-1. Pulsa "Generar menu semanal". Si no hay ingredientes, la app mostrara un aviso para ir a Ingredientes o cargar ingredientes de prueba.
-2. Si hay menos de 5 ingredientes, la app pedira ampliar la nevera antes de generar.
+1. Pulsa "Generar menú semanal". Si no hay ingredientes, la app mostrará un aviso para ir a Ingredientes o cargar ingredientes de prueba.
+2. Si hay menos de 5 ingredientes, la app pedirá ampliar la nevera antes de generar.
 3. Ajusta preferencias: tipo de dieta, restricciones, ingredientes excluidos desde tu nevera, objetivos y variedad semanal.
-4. Pulsa "Generar menu semanal".
-5. Si no hay clave valida de Gemini, acepta el aviso para continuar con modo demo.
-6. Sustituye un plato para mostrar el flujo de regeneracion.
+4. Pulsa "Generar menú semanal".
+5. Si no hay clave válida de Gemini, acepta el aviso para continuar con modo demo.
+6. Sustituye un plato para mostrar el flujo de regeneración.
 7. Repite una receta guardada desde el selector.
 8. Filtra el recetario, abre una tarjeta, crea una receta manual, marca una favorita y edita raciones, dificultad, foto, ingredientes o pasos.
-9. Entra en Recetas y deja que la grid complete algunas imagenes de forma progresiva. Abre el detalle de una receta si quieres forzar manualmente la siguiente alternativa cacheada sin bloquear la generacion semanal.
+9. Entra en Recetas y deja que la grid complete algunas imágenes de forma progresiva. Abre el detalle de una receta si quieres forzar manualmente la siguiente alternativa cacheada sin bloquear la generación semanal.
 
-## Referencias oficiales usadas para esta configuracion
+## Referencias oficiales usadas para esta configuración
 
 - Google AI Studio / Gemini API: https://ai.google.dev/aistudio
-- Gestion de claves Gemini API: https://ai.google.dev/gemini-api/docs/api-key
+- Gestión de claves Gemini API: https://ai.google.dev/gemini-api/docs/api-key
 - Referencia API Gemini: https://ai.google.dev/api
 - Troubleshooting oficial Gemini API: https://ai.google.dev/gemini-api/docs/troubleshooting
 
@@ -439,16 +439,16 @@ Se separaron algunas mejoras por fases para evitar meter demasiada complejidad d
 ## 6. UI escalable para ingredientes excluidos
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Hacer usable la seleccion de ingredientes excluidos cuando la nevera crece.
+**Objetivo:** Hacer usable la selección de ingredientes excluidos cuando la nevera crece.
 
 **Prompt usado:**
 
-> Vamos a mejorar la UI/UX de la seccion "Ingredientes excluidos" en Preferencias. La lista actual como cuadricula de tarjetas grandes no escala bien si el usuario tiene 20, 40 o mas ingredientes.
+> Vamos a mejorar la UI/UX de la sección "Ingredientes excluidos" en Preferencias. La lista actual como cuadrícula de tarjetas grandes no escala bien si el usuario tiene 20, 40 o más ingredientes.
 >
-> Sustituye la cuadricula por un componente compacto con buscador, filtros rapidos por categoria, lista con checkboxes, scroll interno, resumen de seleccion, chips de ingredientes excluidos, limpiar seleccion y estado vacio con boton "Ir a ingredientes".
+> Sustituye la cuadrícula por un componente compacto con buscador, filtros rápidos por categoría, lista con checkboxes, scroll interno, resumen de selección, chips de ingredientes excluidos, limpiar selección y estado  vacío con botón "Ir a ingredientes".
 
 **Por qué funcionó:**
-Convierte una lista visualmente pesada en un selector compacto y escalable sin tocar el contrato de generacion.
+Convierte una lista visualmente pesada en un selector compacto y escalable sin tocar el contrato de generación.
 
 **Qué se ajustó después:**
 Se mantuvieron los IDs reales de ingredientes y se persistieron las preferencias en el navegador para no perder exclusiones al refrescar.
@@ -458,248 +458,248 @@ Se mantuvieron los IDs reales de ingredientes y se persistieron las preferencias
 ## 7. Recetario manual, navegación y favoritos
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Sustituir el flujo de variantes por edicion, creacion manual y favoritas con peso en la generacion.
+**Objetivo:** Sustituir el flujo de variantes por edición, creación manual y favoritas con peso en la generación.
 
 **Prompt usado:**
 
-> Vamos a mejorar la seccion de recetas: quitar "Crear variante", hacer las tarjetas navegables, anadir "Anadir receta", permitir foto, ingredientes, cantidades, pasos, tiempo, dificultad, raciones y etiquetas, y anadir favoritas que pesen mas en la generacion si encajan.
+> Vamos a mejorar la sección de recetas: quitar "Crear variante", hacer las tarjetas navegables, añadir "Añadir receta", permitir foto, ingredientes, cantidades, pasos, tiempo, dificultad, raciones y etiquetas, y añadir favoritas que pesen más en la generación si encajan.
 
 **Por qué funcionó:**
-Refuerza el recetario como fuente real del menu: el usuario puede crear, editar, abrir y marcar favoritas sin depender de un flujo secundario de variantes.
+Refuerza el recetario como fuente real del menú: el usuario puede crear, editar, abrir y marcar favoritas sin depender de un flujo secundario de variantes.
 
 **Qué se ajustó después:**
 El backend prioriza favoritas compatibles en el prompt/fallback, pero sigue permitiendo recetas nuevas si las guardadas no encajan con nevera y preferencias.
 
 ---
 
-## 8. Reservar Gemini para el flujo principal del menu
+## 8. Reservar Gemini para el flujo principal del menú
 
 **Herramienta:** Codex / Gemini
-**Objetivo:** Reducir consumo de cuota y dejar Gemini solo para la generacion semanal del menu.
+**Objetivo:** Reducir consumo de cuota y dejar Gemini solo para la generación semanal del menú.
 
 **Prompt usado:**
 
-> Quiero cambiar la estrategia del proyecto para hacer un uso mucho mas eficiente de Gemini: Gemini debe quedar reservado solo para la generacion de menus semanales y la resolucion de imagenes debe salir de Gemini por completo.
+> Quiero cambiar la estrategia del proyecto para hacer un uso mucho más eficiente de Gemini: Gemini debe quedar reservado solo para la generación de menús semanales y la resolución de imágenes debe salir de Gemini por completo.
 
 **Por qué funcionó:**
-Obligo a separar claramente lo critico del producto de lo accesorio: el presupuesto de Gemini se reserva al menu semanal y las imagenes dejan de competir por cuota.
+Obligó a separar claramente lo crítico del producto de lo accesorio: el presupuesto de Gemini se reserva al menú semanal y las imágenes dejan de competir por cuota.
 
 **Qué se ajustó después:**
-La UI de menu paso a comunicar mejor los estados de saturacion, cooldown y error temporal de Gemini, mientras que el recetario dejo de lanzar resoluciones automáticas al cargar.
+La UI de menú pasó a comunicar mejor los estados de saturación, cooldown y error temporal de Gemini, mientras que el recetario dejó de lanzar resoluciones automáticas al cargar.
 
 ---
 
-## 9. Resolucion de imagenes por busqueda HTTP y candidatos cacheados
+## 9. Resolución de imágenes por búsqueda HTTP y candidatos cacheados
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Sacar las imagenes fuera de Gemini y convertirlas en un flujo secundario, barato y controlado.
+**Objetivo:** Sacar las imágenes fuera de Gemini y convertirlas en un flujo secundario, barato y controlado.
 
 **Prompt usado:**
 
-> La resolucion de imagenes ya no debe usar Gemini. Dada una receta, usa el nombre del plato para buscar candidatos por HTTP, valida una lista corta, persiste esos candidatos y haz que el boton de reintento avance entre alternativas ya encontradas en lugar de lanzar una nueva busqueda completa.
+> La resolución de imágenes ya no debe usar Gemini. Dada una receta, usa el nombre del plato para buscar candidatos por HTTP, valida una lista corta, persiste esos candidatos y haz que el botón de reintento avance entre alternativas ya encontradas en lugar de lanzar una nueva búsqueda completa.
 
 **Por qué funcionó:**
-Movio la complejidad a un flujo mucho mas predecible: se buscan paginas por HTTP, se extraen imagenes desde metadatos estandar y se reutilizan candidatos ya validados sin gastar cuota de Gemini.
+Movió la complejidad a un flujo mucho más predecible: se buscan páginas por HTTP, se extraen imágenes desde metadatos estándar y se reutilizan candidatos ya validados sin gastar cuota de Gemini.
 
 **Qué se ajustó después:**
-Se limito el numero de alternativas visibles por receta y se introdujo el estado `attempts_exhausted` para dejar de insistir cuando ya no compensa seguir buscando.
+Se limitó el número de alternativas visibles por receta y se introdujo el estado `attempts_exhausted` para dejar de insistir cuando ya no compensa seguir buscando.
 
 ---
 
 ## 10. Robustez del generador semanal con IA
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar que la generacion semanal caiga a `fallback-local` por respuestas parcialmente invalidas del modelo.
+**Objetivo:** Evitar que la generación semanal caiga a `fallback-local` por respuestas parcialmente inválidas del modelo.
 
 **Prompt usado:**
 
-> Quiero robustecer la generacion semanal con IA: registrar por que se rechaza un payload parseable, hacer un retry controlado antes del fallback, intentar reparar slots invalidos y dejar trazabilidad clara de los casos `rate_limited`, `upstream_error`, `invalid` o `not_found`.
+> Quiero robustecer la generación semanal con IA: registrar por qué se rechaza un payload parseable, hacer un retry controlado antes del fallback, intentar reparar slots inválidos y dejar trazabilidad clara de los casos `rate_limited`, `upstream_error`, `invalid` o `not_found`.
 
 **Por qué funcionó:**
-Permitió diagnosticar problemas reales del flujo, reducir fallback silencioso y dejar logs defendibles en `system_logs` sobre validacion, retry y rechazo de Gemini.
+Permitió diagnosticar problemas reales del flujo, reducir fallback silencioso y dejar logs defendibles en `system_logs` sobre validación, retry y rechazo de Gemini.
 
 **Qué se ajustó después:**
-Se endurecieron despues las reglas de despensa basica y se priorizo devolver error controlado ante `429` o saturacion temporal, en lugar de persistir menus de fallback engañosos.
+Se endurecieron después las reglas de despensa básica y se priorizó devolver error controlado ante `429` o saturación temporal, en lugar de persistir menús de fallback engañosos.
 
 ---
 
-## 11. Reglas domesticas de despensa y UX de estados
+## 11. Reglas domésticas de despensa y UX de estados
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Hacer el producto mas realista en cocina domestica y mejorar los estados visuales de espera, rate limit y resolucion de imagen.
+**Objetivo:** Hacer el producto más realista en cocina doméstica y mejorar los estados visuales de espera, rate limit y resolución de imagen.
 
 **Prompt usado:**
 
-> Ajusta la logica del generador para aceptar una despensa basica limitada sin vaciar el valor del producto, trata aceite de oliva, sal, pimienta y agua como apoyo libre, evita invalidaciones artificiales y revisa la UX para que la generacion semanal y la resolucion de imagen siempre muestren carga, cooldown, error o exito de forma clara y sin glitches visuales.
+> Ajusta la lógica del generador para aceptar una despensa básica limitada sin vaciar el valor del producto, trata aceite de oliva, sal, pimienta y agua como apoyo libre, evita invalidaciones artificiales y revisa la UX para que la generación semanal y la resolución de imagen siempre muestren carga, cooldown, error o éxito de forma clara y sin glitches visuales.
 
 **Por qué funcionó:**
-Mejoró dos capas a la vez: las recetas rechazaban menos casos razonables y la interfaz dejó de dar sensacion de bloqueo silencioso o mezcla de estados contradictorios.
+Mejoró dos capas a la vez: las recetas rechazaban menos casos razonables y la interfaz dejó de dar sensación de bloqueo silencioso o mezcla de estados contradictorios.
 
 **Qué se ajustó después:**
-La grid de recetas se limpió visualmente para quitar badges tecnicos de la superficie principal y dejar la trazabilidad tecnica en el detalle de receta y en logs.
+La grid de recetas se limpió visualmente para quitar badges técnicos de la superficie principal y dejar la trazabilidad técnica en el detalle de receta y en logs.
 
 ---
 
-## 12. Correccion del flujo de reintento de imagen
+## 12. Corrección del flujo de reintento de imagen
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Eliminar glitches visuales y convertir el reintento de imagen en una rotacion limpia entre candidatos ya encontrados.
+**Objetivo:** Eliminar glitches visuales y convertir el reintento de imagen en una rotación limpia entre candidatos ya encontrados.
 
 **Prompt usado:**
 
-> Revisa el flujo de reintento de imagen en el detalle de receta. Quiero una maquina de estados clara, sin mezclar “Buscando...” con errores viejos, con boton deshabilitado durante la espera y haciendo que cada reintento avance a la siguiente alternativa cacheada en vez de repetir la busqueda completa.
+> Revisa el flujo de reintento de imagen en el detalle de receta. Quiero una máquina de estados clara, sin mezclar “Buscando...” con errores viejos, con botón deshabilitado durante la espera y haciendo que cada reintento avance a la siguiente alternativa cacheada en vez de repetir la búsqueda completa.
 
 **Por qué funcionó:**
 Obligó a separar correctamente el estado de carga del estado previo, a evitar llamadas duplicadas y a convertir el reintento en un flujo determinista y mucho menos costoso.
 
 **Qué se ajustó después:**
-La UI paso a distinguir mejor entre `pending`, `invalid`, `not_found`, `upstream_error` y `attempts_exhausted`, con copy especifico para resolucion de imagen por HTTP.
+La UI pasó a distinguir mejor entre `pending`, `invalid`, `not_found`, `upstream_error` y `attempts_exhausted`, con copy específico para resolución de imagen por HTTP.
 
 ---
 
-## 13. Evaluacion de Ollama local para la generacion textual
+## 13. Evaluación de Ollama local para la generación textual
 
 **Herramienta:** Codex / Ollama
-**Objetivo:** Evaluar si un proveedor local de texto podia convertirse en el camino principal para generar el menu semanal y las sustituciones sin depender de servicios externos.
+**Objetivo:** Evaluar si un proveedor local de texto podía convertirse en el camino principal para generar el menú semanal y las sustituciones sin depender de servicios externos.
 
 **Prompt usado:**
 
-> Separa la arquitectura para soportar un proveedor local de texto y valida si un flujo con Ollama en CPU puede sostener la generacion semanal completa con suficiente estabilidad y latencia razonable para la prueba tecnica.
+> Separa la arquitectura para soportar un proveedor local de texto y valida si un flujo con Ollama en CPU puede sostener la generación semanal completa con suficiente estabilidad y latencia razonable para la prueba técnica.
 
 **Por qué funcionó:**
-Permitió comprobar con datos reales que el desacoplamiento arquitectonico era correcto, pero tambien que la generacion semanal completa con modelo pequeno en CPU seguia siendo demasiado fragil para esta entrega.
+Permitió comprobar con datos reales que el desacoplamiento arquitectónico era correcto, pero también que la generación semanal completa con modelo pequeño en CPU seguía siendo demasiado frágil para esta entrega.
 
 **Qué se ajustó después:**
-La decision final fue no mezclar ese experimento con la entrega principal. La rama `main` se mantiene en la via mas estable y el experimento local con Ollama queda preservado en `experiment/local-ollama-menu` para retomarlo mas adelante.
+La decisión final fue no mezclar ese experimento con la entrega principal. La rama `main` se mantiene en la vía más estable y el experimento local con Ollama queda preservado en `experiment/local-ollama-menu` para retomarlo más adelante.
 
 ---
 
-## 14. Control de cuota y trafico secundario
+## 14. Control de cuota y tráfico secundario
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar que la vista de recetas dispare trafico secundario innecesario y reservar Gemini para los menus, sin renunciar a mejorar la grid progresivamente.
+**Objetivo:** Evitar que la vista de recetas dispare tráfico secundario innecesario y reservar Gemini para los menús, sin renunciar a mejorar la grid progresivamente.
 
 **Prompt usado:**
 
-> Revisa si la vista de recetas esta disparando busquedas de imagen al cargar y rediseña el flujo para que la resolucion use una cola progresiva pequena: solo unas pocas recetas visibles, un unico lote en vuelo, candidatos cacheados y sin competir con la generacion del menu semanal.
+> Revisa si la vista de recetas está disparando búsquedas de imagen al cargar y rediseña el flujo para que la resolución use una cola progresiva pequeña: solo unas pocas recetas visibles, un único lote en vuelo, candidatos cacheados y sin competir con la generación del menú semanal.
 
 **Por qué funcionó:**
-Forzo una politica mas realista para el MVP: las imagenes enriquecen el producto, pero no deben competir con el flujo principal ni lanzar tormentas de llamadas al entrar en `Recetas`.
+Forzó una política más realista para el MVP: las imágenes enriquecen el producto, pero no deben competir con el flujo principal ni lanzar tormentas de llamadas al entrar en `Recetas`.
 
 **Qué se ajustó después:**
-La grid paso a completar imagenes de forma progresiva y controlada sobre un pequeno conjunto de recetas visibles. Cada lote resuelve pocas recetas, reutiliza candidatos cacheados y deja fuera cualquier reintento automatico cuando una receta ya agotó sus intentos o entro en un estado final.
+La grid pasó a completar imágenes de forma progresiva y controlada sobre un pequeño conjunto de recetas visibles. Cada lote resuelve pocas recetas, reutiliza candidatos cacheados y deja fuera cualquier reintento automático cuando una receta ya agotó sus intentos o entró en un estado final.
 
 ---
 
 ## 15. Restricciones duras de dieta y explicaciones limpias
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar que una dieta vegetariana deje pasar proteinas animales y limpiar el texto explicativo para que suene a producto, no a prompt interno.
+**Objetivo:** Evitar que una dieta vegetariana deje pasar proteínas animales y limpiar el texto explicativo para que suene a producto, no a prompt interno.
 
 **Prompt usado:**
 
-> Quiero que la dieta vegetariana se trate como una restriccion obligatoria en backend y que el campo “Por que este plato” se limpie o regenere si filtra instrucciones internas del sistema.
+> Quiero que la dieta vegetariana se trate como una restricción obligatoria en backend y que el campo “Por qué este plato” se limpie o regenere si filtra instrucciones internas del sistema.
 
 **Por qué funcionó:**
-Forzó a dejar de confiar solo en el prompt. La validacion semanal ahora invalida carne, pescado y marisco cuando el usuario marca vegetariano, y el campo `explanation` pasa por una capa de saneado para que no mencione reglas, contexto o razonamiento interno.
+Forzó a dejar de confiar solo en el prompt. La validación semanal ahora invalida carne, pescado y marisco cuando el usuario marca vegetariano, y el campo `explanation` pasa por una capa de saneado para que no mencione reglas, contexto o razonamiento interno.
 
 **Qué se ajustó después:**
-La misma regla dura se aplicó tambien al contexto de recetas guardadas compatibles para no alimentar al modelo con recetas que ya nacen fuera de dieta.
+La misma regla dura se aplicó también al contexto de recetas guardadas compatibles para no alimentar al modelo con recetas que ya nacen fuera de dieta.
 
 ---
 
-## 16. Prevalidacion contextual antes de gastar cuota
+## 16. Prevalidación contextual antes de gastar cuota
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar llamadas inutiles a Gemini cuando las preferencias dejan una base de ingredientes demasiado pobre para construir una semana valida.
+**Objetivo:** Evitar llamadas inútiles a Gemini cuando las preferencias dejan una base de ingredientes demasiado pobre para construir una semana válida.
 
 **Prompt usado:**
 
-> Antes de llamar a la IA, calcula los ingredientes realmente compatibles con dieta, restricciones, exclusiones y nivel de variedad. Si no queda una base minima viable, no hagas la llamada y devuelve un mensaje claro explicando que faltan ingredientes compatibles o que hace falta relajar alguna preferencia.
+> Antes de llamar a la IA, calcula los ingredientes realmente compatibles con dieta, restricciones, exclusiones y nivel de variedad. Si no queda una base mínima viable, no hagas la llamada y devuelve un mensaje claro explicando que faltan ingredientes compatibles o que hace falta relajar alguna preferencia.
 
 **Por qué funcionó:**
-Convirtio un error generico al final del flujo en una decision temprana y explicable. El backend ahora corta antes de gastar cuota cuando la combinacion de filtros deja demasiado poco margen real para construir el menu semanal.
+Convirtió un error genérico al final del flujo en una decisión temprana y explicable. El backend ahora corta antes de gastar cuota cuando la combinación de filtros deja demasiado poco margen real para construir el menú semanal.
 
 **Qué se ajustó después:**
-La validacion se hizo contextual en lugar de limitarse a la regla fija de “menos de 5 ingredientes”: endurece el umbral si coinciden restricciones de dieta, baja en carbohidratos o variedad alta, y devuelve un mensaje accionable con los factores que estan bloqueando la generacion.
+La validación se hizo contextual en lugar de limitarse a la regla fija de “menos de 5 ingredientes”: endurece el umbral si coinciden restricciones de dieta, baja en carbohidratos o variedad alta, y devuelve un mensaje accionable con los factores que están bloqueando la generación.
 
 ---
 
-## 17. Seleccion de imagenes mas practica para platos simples
+## 17. Selección de imágenes más práctica para platos simples
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar que recetas sencillas como ensaladas, bowls o salteados se queden sin imagen por una heuristica demasiado literal.
+**Objetivo:** Evitar que recetas sencillas como ensaladas, bowls o salteados se queden sin imagen por una heurística demasiado literal.
 
 **Prompt usado:**
 
-> Relaja la seleccion de imagenes para aceptar resultados visualmente razonables del mismo tipo de plato aunque tengan algun ingrediente secundario extra. Rechaza solo lo claramente irrelevante.
+> Relaja la selección de imágenes para aceptar resultados visualmente razonables del mismo tipo de plato aunque tengan algún ingrediente secundario extra. Rechaza solo lo claramente irrelevante.
 
 **Por qué funcionó:**
-Ataco el sitio correcto: no se relajo la validacion HTTP de la imagen, sino la heuristica de recuperacion. Las busquedas pasan a ser menos literales y el descarte por URL deja de bloquear terminos como `banner` que en muchos sitios de recetas corresponden justo a la imagen principal del plato.
+Atacó el sitio correcto: no se relajó la validación HTTP de la imagen, sino la heurística de recuperación. Las búsquedas pasan a ser menos literales y el descarte por URL deja de bloquear términos como `banner` que en muchos sitios de recetas corresponden justo a la imagen principal del plato.
 
 **Qué se ajustó después:**
-La estrategia se mantiene conservadora con ruido evidente (`logo`, `icon`, `avatar`, `placeholder`), pero deja de exigir una coincidencia demasiado rigida entre el nombre exacto de la receta y la imagen recuperada.
+La estrategia se mantiene conservadora con ruido evidente (`logo`, `icon`, `avatar`, `placeholder`), pero deja de exigir una coincidencia demasiado rígida entre el nombre exacto de la receta y la imagen recuperada.
 
 ---
 
-## 18. Busqueda semantica para recetas simples y postres lacteos
+## 18. Búsqueda semántica para recetas simples y postres lácteos
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Evitar que recetas genericas como yogur con fruta, ensaladas o bowls se queden sin imagen por depender demasiado del titulo exacto.
+**Objetivo:** Evitar que recetas genéricas como yogur con fruta, ensaladas o bowls se queden sin imagen por depender demasiado del título exacto.
 
 **Prompt usado:**
 
-> Para recetas simples o genericas, genera queries mas naturales y semanticas por familia visual del plato: yogur con frutas, copa de yogur, parfait, postre lacteo, ensalada, bowl o tostada. No quiero que la busqueda dependa solo del titulo exacto.
+> Para recetas simples o genéricas, genera queries más naturales y semánticas por familia visual del plato: yogur con frutas, copa de yogur, parfait, postre lácteo, ensalada, bowl o tostada. No quiero que la búsqueda dependa solo del título exacto.
 
 **Por qué funcionó:**
-Corrigio el cuello de botella real: las busquedas por titulo completo eran pobres para platos sencillos. Al introducir familias visuales y variantes naturales, el backend llega a paginas mucho mas utiles sin relajar la validacion HTTP de la imagen.
+Corrigió el cuello de botella real: las búsquedas por título completo eran pobres para platos sencillos. Al introducir familias visuales y variantes naturales, el backend llega a páginas mucho más útiles sin relajar la validación HTTP de la imagen.
 
 **Qué se ajustó después:**
-Se mantuvo el descarte de ruido claro (`logo`, `icon`, `avatar`, `placeholder`), pero la recuperacion ya no penaliza recetas como `Yogur con Fruta Fresca y Queso`, donde el queso puede no ser evidente visualmente aunque la imagen represente bien el plato.
+Se mantuvo el descarte de ruido claro (`logo`, `icon`, `avatar`, `placeholder`), pero la recuperación ya no penaliza recetas como `Yogur con Fruta Fresca y Queso`, donde el queso puede no ser evidente visualmente aunque la imagen represente bien el plato.
 
 ---
 
-## 19. Refactorizacion tactica del frontend antes de la entrega
+## 19. Refactorización táctica del frontend antes de la entrega
 
 **Herramienta:** Codex / Antigravity
 **Objetivo:** Reducir el tamaño y la complejidad de `frontend/app/page.tsx` sin abrir una reescritura ni cambiar el comportamiento visible de la app.
 
 **Prompt usado:**
 
-> Quiero una refactorizacion tactica del frontend: extrae solo los bloques visuales grandes y cohesionados que de verdad bajen el peso de `page.tsx`, manteniendo la pagina principal como contenedor de estado y composicion.
+> Quiero una refactorización táctica del frontend: extrae solo los bloques visuales grandes y cohesionados que de verdad bajen el peso de `page.tsx`, manteniendo la página principal como contenedor de estado y composición.
 
 **Por qué funcionó:**
-Fijo bien el alcance. En lugar de mover medio frontend, la refactorizacion se centro en componentes con responsabilidad clara (`RecipeDetailView`, `RecipeModal`, `IngredientModal`, banners y superficies visuales) y en un modulo compartido de tipos y helpers.
+Fijó bien el alcance. En lugar de mover medio frontend, la refactorización se centró en componentes con responsabilidad clara (`RecipeDetailView`, `RecipeModal`, `IngredientModal`, banners y superficies visuales) y en un módulo compartido de tipos y helpers.
 
 **Qué se ajustó después:**
-`page.tsx` paso de 3778 a 2101 lineas manteniendo la misma UX visible, el mismo contrato con backend y la misma orquestacion principal dentro de `Home`.
+`page.tsx` pasó de 3778 a 2101 líneas manteniendo la misma UX visible, el mismo contrato con backend y la misma orquestación principal dentro de `Home`.
 
 ---
 
-## 20. Galeria de alternativas para imagenes de receta
+## 20. Galería de alternativas para imágenes de receta
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Dejar atras el flujo ciego de “probar otra imagen” y convertir la seleccion de imagen en una galeria real sobre candidatos ya cacheados.
+**Objetivo:** Dejar atrás el flujo ciego de “probar otra imagen” y convertir la selección de imagen en una galería real sobre candidatos ya cacheados.
 
 **Prompt usado:**
 
-> Si una receta ya tiene candidatos de imagen cacheados, no quiero mas reintentos lineales. Quiero navegar libremente entre alternativas, volver a una anterior, elegir una como definitiva o dejar la receta sin foto, sin lanzar nuevas busquedas.
+> Si una receta ya tiene candidatos de imagen cacheados, no quiero más reintentos lineales. Quiero navegar libremente entre alternativas, volver a una anterior, elegir una como definitiva o dejar la receta sin foto, sin lanzar nuevas búsquedas.
 
 **Por qué funcionó:**
-Obligo a separar dos conceptos que antes estaban mezclados: la alternativa que el usuario esta previsualizando y la foto que queda finalmente persistida. Con ese ajuste, el backend conserva el cache y el frontend puede tratarlo como una galeria pequena y estable.
+Obligó a separar dos conceptos que antes estaban mezclados: la alternativa que el usuario está previsualizando y la foto que queda finalmente persistida. Con ese ajuste, el backend conserva el cache y el frontend puede tratarlo como una galería pequeña y estable.
 
 **Qué se ajustó después:**
-La receta ahora expone `image_candidates` e `image_candidate_index`, el detalle permite moverse con `Anterior` y `Siguiente`, elegir `Usar esta imagen` o `Quitar foto`, y la busqueda HTTP solo se vuelve a lanzar cuando de verdad no hay candidatos guardados.
+La receta ahora expone `image_candidates` e `image_candidate_index`, el detalle permite moverse con `Anterior` y `Siguiente`, elegir `Usar esta imagen` o `Quitar foto`, y la búsqueda HTTP solo se vuelve a lanzar cuando de verdad no hay candidatos guardados.
 
 ---
 
-# Roadmap despues del MVP
+# Roadmap después del MVP
 
-- Autenticacion real mediante JSON WEB TOKEN y perfiles de usuario.
+- Autenticación real mediante JSON WEB TOKEN y perfiles de usuario.
 - Migraciones con Alembic.
 - Tests unitarios y E2E con Playwright.
 - Lista de compra agregada por semana.
-- Objetivos nutricionales y restricciones medicas verificables.
+- Objetivos nutricionales y restricciones médicas verificables.
 - Mejor control de coste, cuota y trazabilidad de prompts.
 - Preferencias por cantidad de personas en la familia.
-- Recetas con resta automatica de ingredientes en la nevera usados.
+- Recetas con resta automática de ingredientes en la nevera usados.
