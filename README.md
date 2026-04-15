@@ -8,12 +8,6 @@ Durante el desarrollo se exploro una integracion local con Ollama para que la ge
 
 La entrega final prioriza por tanto la version mas estable y defendible del producto. El trabajo experimental queda preservado en una rama separada del repositorio: `experiment/local-ollama-menu`.
 
-## Entregables de la prueba
-
-- Repositorio ejecutable con instrucciones locales.
-- Video de maximo 3 minutos explicando problema, solucion, uso de IA y mejoras.
-- Prompt log con al menos 3 prompts clave.
-
 ## Funcionalidad MVP
 
 - Usuario demo sin login.
@@ -59,7 +53,7 @@ Copy-Item .env.example .env
 
 ### 2. Crear una clave Gemini API en Google AI Studio
 
-Paso a paso contrastado con la documentacion oficial de Google AI for Developers:
+Paso a paso oficial de Google AI for Developers:
 
 1. Entra en Google AI Studio: https://aistudio.google.com/
 2. Inicia sesion con tu cuenta de Google.
@@ -88,8 +82,6 @@ Abre `.env` y deja, como minimo:
 GEMINI_API_KEY=tu_clave_real_aqui
 GEMINI_MODEL=gemini-2.5-flash-lite
 ```
-
-No subas `.env` al repositorio. La clave se usa solo en el backend mediante la variable `GEMINI_API_KEY`; el frontend no la recibe.
 
 ### 4. Levantar la aplicacion
 
@@ -156,20 +148,6 @@ Si `configured` sale `false`, revisa:
 4. Si Gemini esta bien configurado y con cuota disponible, el backend intentara generar el menu con IA real.
 5. Si no hay clave valida, la app te avisara antes y podras continuar con modo demo local.
 
-## Creacion de la clave Gemini API: resumen corto
-
-Si solo quieres el minimo imprescindible:
-
-1. Ve a https://aistudio.google.com/apikey
-2. Inicia sesion
-3. Crea o importa un proyecto si hace falta
-4. Genera una API key
-5. Copiala en `.env` como `GEMINI_API_KEY=...`
-6. Reinicia `docker compose up --build`
-7. Comprueba `curl http://localhost:8000/ai/status`
-
-Sin una `GEMINI_API_KEY` valida, el menu se genera con fallback local controlado. Esto es intencional para que la entrega sea ejecutable aunque no haya cuota o conexion con Gemini, pero para evaluar la integracion IA real configura tu propia clave. Si no hay ingredientes en la nevera, la app no genera un menu con datos inventados: muestra un estado vacio y permite cargar ingredientes de prueba en PostgreSQL desde la UI.
-
 ## Ejecucion local sin Docker
 
 Backend:
@@ -198,14 +176,12 @@ npm run dev
 
 ## Variables de entorno
 
-| Variable                        | Uso                                                                      | Valor por defecto            |
-| ------------------------------- | ------------------------------------------------------------------------ | ---------------------------- |
-| `GEMINI_API_KEY`              | Clave local de Gemini API. Si falta, se usa fallback local.              | vacio                        |
-| `GEMINI_MODEL`                | Modelo usado para `generateContent`.                                   | `gemini-2.5-flash-lite`    |
-| `DATABASE_URL`                | Conexion SQLAlchemy del backend.                                         | SQLite local fuera de Docker |
-| `NEXT_PUBLIC_API_URL`         | URL de la API para el navegador.                                         | `http://localhost:8000`    |
-
-La clave no debe escribirse en codigo ni commitearse. Google recomienda tratarla como una contrasena, no exponerla en cliente y preferir llamadas server-side. Por eso la app llama a Gemini desde FastAPI y solo publica `.env.example` con placeholders.
+| Variable                | Uso                                                         | Valor por defecto            |
+| ----------------------- | ----------------------------------------------------------- | ---------------------------- |
+| `GEMINI_API_KEY`      | Clave local de Gemini API. Si falta, se usa fallback local. | vacio                        |
+| `GEMINI_MODEL`        | Modelo usado para `generateContent`.                      | `gemini-2.5-flash-lite`    |
+| `DATABASE_URL`        | Conexion SQLAlchemy del backend.                            | SQLite local fuera de Docker |
+| `NEXT_PUBLIC_API_URL` | URL de la API para el navegador.                            | `http://localhost:8000`    |
 
 ## Problemas habituales al crear o usar la clave Gemini
 
@@ -249,36 +225,6 @@ La app registra estos casos en `system_logs` y distingue entre error, saturacion
 curl "http://localhost:8000/logs?module=ai&limit=20"
 ```
 
-## Datos de prueba y fallback
-
-- La app no precarga ingredientes al arrancar.
-- Las categorias de ingredientes viven en la base de datos y se crean en arranque si faltan: Verduras, Frutas, Proteinas, Lacteos, Cereales, Legumbres, Especias y Otros.
-- La vista Ingredientes usa un modal para anadir alimentos con nombre, categoria, cantidad y fecha de caducidad.
-- Los filtros de Ingredientes permiten buscar por nombre/categoria, filtrar por categoria y ordenar por caducidad o cantidad. Por defecto se priorizan los proximos a caducar.
-- Si la nevera esta vacia o tiene menos de 5 ingredientes, al intentar generar menu aparece un modal con opciones para ir a Ingredientes, cargar ingredientes de prueba o cancelar.
-- Al pulsar "Anadir ingredientes de prueba" en ese aviso, el frontend llama a `POST /ingredients/demo` y el backend guarda esos ingredientes en la base de datos.
-- La generacion de menus exige al menos 5 ingredientes reales guardados, ya sean introducidos manualmente o cargados mediante el endpoint demo.
-- Los ingredientes excluidos se seleccionan desde los ingredientes existentes en la nevera. Si tras aplicar exclusiones quedan menos de 5 ingredientes disponibles, la app avisa antes de llamar a Gemini o al fallback.
-- Antes de llamar a Gemini, el backend hace una prevalidacion contextual de viabilidad: cruza dieta, restricciones, ingredientes excluidos, recetas guardadas compatibles y nivel de variedad para detectar cuando ya no queda una base minima razonable. En esos casos devuelve un `400` accionable y no gasta cuota en una llamada condenada a fallar.
-- El backend pasa como contexto recetas guardadas compatibles y prioriza las favoritas compatibles sin forzarlas si no encajan.
-- Las restricciones de dieta como `Vegetariano` y `Vegano` se tratan como reglas duras en backend: una receta con carne, pescado o marisco no puede sobrevivir al menu final aunque el modelo la devuelva.
-- La generacion semanal prioriza estabilidad: Gemini queda reservado al flujo principal del menu semanal.
-- La resolucion de imagenes ya no usa Gemini. Se hace por busqueda HTTP basada en el nombre de la receta.
-- La vista `Recetas` puede auto-resolver de forma progresiva un pequeno lote de recetas visibles sin imagen, con concurrencia baja y sin tormentas de llamadas.
-- El backend busca paginas candidatas del plato, extrae imagenes desde metadatos estandar (`og:image`, `twitter:image`, JSON-LD/schema.org) y valida por HTTP la imagen final.
-- Los candidatos de imagen se cachean por receta. El boton de reintento rota entre candidatos ya encontrados y no repite la busqueda completa en cada clic.
-- Si una receta tiene varias alternativas cacheadas, el usuario puede recorrerlas todas. La UI muestra la posicion actual (`Alternativa X de Y`), permite avanzar al siguiente candidato sin lanzar una nueva busqueda y, al llegar al ultimo, ofrece dejar la receta sin foto.
-- La validacion de imagen prioriza utilidad visual sobre coincidencia exacta ingrediente a ingrediente: acepta imagenes razonables del mismo tipo de plato aunque tengan extras secundarios, y solo descarta resultados claramente irrelevantes como logos, iconos o placeholders.
-- Para recetas simples o genericas, la busqueda de imagen usa tambien familias visuales y variantes naturales del plato (`ensalada`, `bowl`, `parfait`, `copa de yogur con frutas`, `postre de yogur`, `tostada`) en lugar de depender solo del titulo exacto.
-- Los estados de resolucion distinguen entre `pending`, `found`, `invalid`, `not_found`, `attempts_exhausted` y `upstream_error`.
-- Tras agotar las alternativas disponibles, la receta mantiene placeholder y deja de insistir automaticamente.
-- El fallback local vive separado en `backend/app/demo_fallback.py` y solo se usa cuando Gemini no esta configurado o cuando la llamada externa falla.
-- Si hay suficientes ingredientes pero no hay clave valida de Gemini, la app avisa antes de generar y permite continuar con modo demo local.
-
-## RTK
-
-El archivo `RTK.md` contiene el checklist operativo antes de entregar: claves, Docker, flujo demo, prompt log y video. Usalo como ultima revision junto con este README.
-
 ## Logging y errores
 
 La app guarda logs estructurados en la tabla `system_logs`. Cada registro incluye:
@@ -315,8 +261,6 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 - Gestion de claves Gemini API: https://ai.google.dev/gemini-api/docs/api-key
 - Referencia API Gemini: https://ai.google.dev/api
 - Troubleshooting oficial Gemini API: https://ai.google.dev/gemini-api/docs/troubleshooting
-
-## Guion sugerido para video de 3 minutos
 
 # Prompt Log
 
@@ -713,35 +657,14 @@ Se mantuvo el descarte de ruido claro (`logo`, `icon`, `avatar`, `placeholder`),
 
 ---
 
-## 19. Navegacion completa entre candidatos de imagen cacheados
+# Roadmap despues del MVP
 
-**Herramienta:** Codex / Antigravity
-**Objetivo:** Dejar de cortar artificialmente la exploracion de imagenes en el tercer intento cuando ya existen mas candidatos validos cacheados.
-
-**Prompt usado:**
-
-> Si una receta ya tiene 6 candidatos de imagen validos, no limites la UX a 3 intentos. El usuario debe poder recorrer los 6, ver `Alternativa X de Y`, y al final decidir dejar la receta sin foto sin lanzar nuevas busquedas.
-
-**Por qué funcionó:**
-Separó correctamente dos conceptos que antes estaban mezclados: los intentos de busqueda HTTP y la navegacion entre alternativas ya encontradas. Con eso se evita bloquear un flujo util sin aumentar el trafico externo.
-
-**Qué se ajustó después:**
-El backend ya no consume “intentos” al avanzar por candidatos cacheados, y el detalle de receta pasa de “Probar otra imagen” a “Dejar sin foto” cuando ya se alcanzó la ultima alternativa disponible.
-
-
-# Estructura del video y presentación
-
-- 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
-- 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker y generacion semanal estable con Gemini configurable y fallback.
-- 0:55-2:10: demo: ingredientes, preferencias, generar menu, sustituir plato, repetir receta y recetario con detalle editable.
-- 2:10-2:35: uso de IA: Antigravity/Codex para desarrollo, Figma AI para explorar interfaz y Gemini para generar menus con ingredientes, preferencias e historial.
-- 2:35-3:00: mejoras: login real, proveedor local de IA mas maduro, nutricion, tests E2E, migraciones y lista de compra.
-
-Roadmap despues del MVP
-
-- Autenticacion real y perfiles de usuario.
+- Autenticacion real mediante JSON WEB TOKEN y perfiles de usuario.
 - Migraciones con Alembic.
 - Tests unitarios y E2E con Playwright.
 - Lista de compra agregada por semana.
 - Objetivos nutricionales y restricciones medicas verificables.
 - Mejor control de coste, cuota y trazabilidad de prompts.
+- Preferencias por cantidad de personas en la familia.
+- Recetas con resta automatica de ingredientes en la nevera usados.
+-
