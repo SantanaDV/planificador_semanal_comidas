@@ -38,9 +38,11 @@ class AiStatusOut(BaseModel):
     configured: bool
     mode: Literal["ai", "fallback"]
     message: str
+    image_provider: str = "http-search"
+    images_enabled: bool = True
 
 
-ImageLookupStatus = Literal["found", "not_found", "invalid", "rate_limited", "upstream_error"]
+ImageLookupStatus = Literal["pending", "found", "not_found", "invalid", "attempts_exhausted", "upstream_error"]
 
 
 class RecipeCreate(BaseModel):
@@ -63,6 +65,10 @@ class RecipeCreate(BaseModel):
 
 class RecipeOut(RecipeCreate):
     id: str
+    image_lookup_attempt_count: int = 0
+    image_candidate_count: int = 0
+    image_candidate_position: int = 0
+    image_can_retry: bool = False
     image_lookup_attempted_at: datetime | None = None
     image_lookup_retry_after: datetime | None = None
     created_at: datetime | None = None

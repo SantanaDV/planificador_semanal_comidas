@@ -30,8 +30,12 @@ type Recipe = {
   image_url?: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
-  image_lookup_status?: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
+  image_lookup_status?: "pending" | "found" | "not_found" | "invalid" | "attempts_exhausted" | "upstream_error" | null;
   image_lookup_reason?: string | null;
+  image_lookup_attempt_count?: number | null;
+  image_candidate_count?: number | null;
+  image_candidate_position?: number | null;
+  image_can_retry?: boolean | null;
   image_lookup_attempted_at?: string | null;
   image_lookup_retry_after?: string | null;
   source: string;
@@ -62,6 +66,8 @@ type AiStatus = {
   configured: boolean;
   mode: "ai" | "fallback";
   message: string;
+  image_provider: string;
+  images_enabled: boolean;
 };
 
 type ViewId = "dashboard" | "menu" | "ingredients" | "recipes" | "recipeDetail" | "preferences";
@@ -108,7 +114,7 @@ type RecipeMutationPayload = {
   image_url: string | null;
   image_source_url?: string | null;
   image_alt_text?: string | null;
-  image_lookup_status?: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
+  image_lookup_status?: "pending" | "found" | "not_found" | "invalid" | "attempts_exhausted" | "upstream_error" | null;
   image_lookup_reason?: string | null;
   is_favorite: boolean;
 };
@@ -132,9 +138,27 @@ type MenuGenerationFeedback = {
   cooldownSeconds: number | null;
 };
 
+type ResolveRecipeImagesOut = {
+  updated_recipes: Recipe[];
+  attempted_count: number;
+  updated_count: number;
+  skipped_count: number;
+  remaining_pending_count: number;
+  stopped_reason?: "pending" | "found" | "not_found" | "invalid" | "attempts_exhausted" | "upstream_error" | null;
+  message: string;
+};
+
+type RecipeImageQueueFeedback = {
+  phase: "idle" | "loading" | "paused";
+  message: string;
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MIN_INGREDIENTS_FOR_MENU = 5;
 const PREFERENCES_STORAGE_KEY = "menuplan-preference-settings";
+const AUTO_RECIPE_IMAGE_VISIBLE_LIMIT = 6;
+const AUTO_RECIPE_IMAGE_BATCH_SIZE = 2;
+const AUTO_RECIPE_IMAGE_DEBOUNCE_MS = 400;
 const dietOptions = [
   { name: "Equilibrada", description: "Variedad de todos los grupos alimenticios" },
   { name: "Baja en carbohidratos", description: "Reduce harinas y azucares" },
@@ -329,22 +353,24 @@ function getRecipeImageCaption(recipe: Recipe) {
 
 function getRecipeImageReason(recipe: Recipe) {
   const normalizedReason = recipe.image_lookup_reason?.trim();
+  const candidateCount = recipe.image_candidate_count ?? 0;
+  const candidatePosition = recipe.image_candidate_position ?? 0;
   const legacyFallbackReason = "El modo demo local no busca imagenes reales en internet.";
 
   if (getRecipeImage(recipe)) {
     return normalizedReason || "La receta ya cuenta con una imagen real validada.";
   }
-  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) {
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined || recipe.image_lookup_status === "pending") {
     return "Todavia no se ha intentado resolver una imagen real para esta receta. La busqueda solo se lanza al abrir el detalle o al pedirla manualmente.";
   }
-  if (recipe.image_lookup_status === "rate_limited") {
-    return normalizedReason || "La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini.";
-  }
   if (recipe.image_lookup_status === "upstream_error") {
-    return normalizedReason || "La resolucion de imagen ha encontrado un error temporal del proveedor o de la pagina fuente.";
+    return normalizedReason || "La busqueda HTTP de imagen ha encontrado un error temporal al consultar paginas externas.";
   }
   if (recipe.image_lookup_status === "invalid") {
     return normalizedReason || "Se encontro una referencia, pero ninguna imagen asociada se pudo validar.";
+  }
+  if (recipe.image_lookup_status === "attempts_exhausted") {
+    return normalizedReason || "Ya se agotaron las alternativas disponibles para esta receta. Se mantendra el placeholder.";
   }
   if (normalizedReason === legacyFallbackReason) {
     return "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.";
@@ -352,15 +378,18 @@ function getRecipeImageReason(recipe: Recipe) {
   if (recipe.source === "fallback-local" && recipe.image_lookup_status === "not_found") {
     return normalizedReason || "La receta se resolvio con fallback local y todavia no tiene una imagen real.";
   }
+  if (candidateCount > 0 && candidatePosition > 0) {
+    return normalizedReason || `No se encontro una opcion mejor en la alternativa ${candidatePosition} de ${candidateCount}.`;
+  }
   return normalizedReason || "No se ha encontrado una imagen real fiable para esta receta.";
 }
 
 function getRecipeImageStatus(recipe: Recipe) {
   if (getRecipeImage(recipe)) return "Imagen encontrada";
-  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Pendiente de resolver";
-  if (recipe.image_lookup_status === "rate_limited") return "Resolucion pausada";
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined || recipe.image_lookup_status === "pending") return "Pendiente de resolver";
   if (recipe.image_lookup_status === "upstream_error") return "Error temporal de resolucion";
   if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
+  if (recipe.image_lookup_status === "attempts_exhausted") return "Intentos agotados";
   return "Sin imagen disponible";
 }
 
@@ -391,9 +420,8 @@ function formatRetryCountdown(totalSeconds: number) {
 
 function canAutoResolveRecipeImage(recipe: Recipe) {
   if (getRecipeImage(recipe)) return false;
-  if (recipe.source === "manual") return false;
   const status = recipe.image_lookup_status;
-  return status === null || status === undefined;
+  return (status === null || status === undefined || status === "pending") && recipe.image_can_retry !== false;
 }
 
 function getRecipeSourceLabel(recipe: Recipe) {
@@ -682,7 +710,14 @@ export default function Home() {
     message: "",
     cooldownSeconds: null,
   });
+  const [autoResolvingRecipeIds, setAutoResolvingRecipeIds] = useState<string[]>([]);
+  const [recipeImageQueueFeedback, setRecipeImageQueueFeedback] = useState<RecipeImageQueueFeedback>({
+    phase: "idle",
+    message: "",
+  });
   const imageResolutionRequestsInFlight = useRef<Set<string>>(new Set());
+  const autoImageResolutionRequested = useRef<Set<string>>(new Set());
+  const autoImageResolutionBatchInFlight = useRef(false);
   const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings, ingredients), [ingredients, preferenceSettings]);
   const usableIngredients = useMemo(
     () => ingredients.filter((ingredient) => !preferenceSettings.excludedIngredientIds.includes(ingredient.id)),
@@ -837,9 +872,9 @@ export default function Home() {
   const activeMeta =
     activeView === "recipeDetail"
       ? {
-          label: selectedRecipe?.title ?? "Detalle de receta",
-          description: "Consulta completa y edicion preparada para recetario.",
-        }
+        label: selectedRecipe?.title ?? "Detalle de receta",
+        description: "Consulta completa y edicion preparada para recetario.",
+      }
       : (navItems.find((item) => item.id === activeView) ?? navItems[0]);
 
   function savePreferences() {
@@ -883,9 +918,9 @@ export default function Home() {
       setMenu((current) =>
         current
           ? {
-              ...current,
-              items: current.items.map((item) => (item.recipe?.id === data.id ? { ...item, recipe: data } : item)),
-            }
+            ...current,
+            items: current.items.map((item) => (item.recipe?.id === data.id ? { ...item, recipe: data } : item)),
+          }
           : current,
       );
       setSelectedRecipeId(data.id);
@@ -939,9 +974,9 @@ export default function Home() {
     setMenu((current) =>
       current
         ? {
-            ...current,
-            items: current.items.map((item) => (item.recipe?.id ? { ...item, recipe: updatedById.get(item.recipe.id) ?? item.recipe } : item)),
-          }
+          ...current,
+          items: current.items.map((item) => (item.recipe?.id ? { ...item, recipe: updatedById.get(item.recipe.id) ?? item.recipe } : item)),
+        }
         : current,
     );
     if (selectedRecipeId && updatedById.has(selectedRecipeId)) {
@@ -952,7 +987,7 @@ export default function Home() {
   async function resolveRecipeImage(recipeId: string, force = false) {
     const currentRecipe = recipes.find((recipe) => recipe.id === recipeId) ?? null;
     const cooldownSeconds =
-      currentRecipe && (currentRecipe.image_lookup_status === "rate_limited" || currentRecipe.image_lookup_status === "upstream_error")
+      currentRecipe && currentRecipe.image_lookup_status === "upstream_error"
         ? getRetryAfterSeconds(currentRecipe.image_lookup_retry_after)
         : null;
     if (cooldownSeconds && cooldownSeconds > 0) {
@@ -994,6 +1029,49 @@ export default function Home() {
     } finally {
       imageResolutionRequestsInFlight.current.delete(recipeId);
       setResolvingRecipeImageId((current) => (current === recipeId ? null : current));
+    }
+  }
+
+  async function resolveRecipeImagesBatch(recipeIds: string[]) {
+    if (!recipeIds.length) return null;
+    const uniqueRecipeIds = Array.from(new Set(recipeIds));
+    uniqueRecipeIds.forEach((recipeId) => imageResolutionRequestsInFlight.current.add(recipeId));
+    setAutoResolvingRecipeIds(uniqueRecipeIds);
+    try {
+      const data = await api<ResolveRecipeImagesOut>("/recipes/resolve-images", {
+        method: "POST",
+        body: JSON.stringify({
+          recipe_ids: uniqueRecipeIds,
+          limit: uniqueRecipeIds.length,
+          force: false,
+        }),
+      });
+      mergeResolvedRecipes(data.updated_recipes);
+      setRecipeImageQueueFeedback({
+        phase: data.stopped_reason === "upstream_error" ? "paused" : "idle",
+        message:
+          data.stopped_reason === "upstream_error"
+            ? "La busqueda automatica de imagenes esta en pausa temporal. Puedes reintentar desde el detalle de cada receta."
+            : "",
+      });
+      reportClientLog("info", "Resolucion automatica de imagenes en lote desde frontend", {
+        action: "resolve_recipe_images_batch",
+        recipe_ids: uniqueRecipeIds,
+        attempted_count: data.attempted_count,
+        updated_count: data.updated_count,
+        stopped_reason: data.stopped_reason,
+      });
+      return data;
+    } catch (error) {
+      setRecipeImageQueueFeedback({
+        phase: "paused",
+        message: "La busqueda automatica de imagenes se ha detenido temporalmente. Puedes continuar desde el detalle de cada receta.",
+      });
+      reportClientLog("error", "Error resolviendo imagenes en lote desde frontend", { action: "resolve_recipe_images_batch", recipe_ids: uniqueRecipeIds }, error);
+      return null;
+    } finally {
+      uniqueRecipeIds.forEach((recipeId) => imageResolutionRequestsInFlight.current.delete(recipeId));
+      setAutoResolvingRecipeIds((current) => current.filter((recipeId) => !uniqueRecipeIds.includes(recipeId)));
     }
   }
 
@@ -1253,6 +1331,37 @@ export default function Home() {
     }
   }
 
+  useEffect(() => {
+    if (activeView !== "recipes" || autoImageResolutionBatchInFlight.current || recipeImageQueueFeedback.phase === "paused") return;
+
+    const eligibleVisibleRecipeIds = filteredRecipes
+      .filter((recipe) => canAutoResolveRecipeImage(recipe) && !autoImageResolutionRequested.current.has(recipe.id))
+      .slice(0, AUTO_RECIPE_IMAGE_VISIBLE_LIMIT)
+      .map((recipe) => recipe.id);
+
+    if (!eligibleVisibleRecipeIds.length) {
+      if (recipeImageQueueFeedback.phase === "loading") {
+        setRecipeImageQueueFeedback({ phase: "idle", message: "" });
+      }
+      return;
+    }
+
+    const batchIds = eligibleVisibleRecipeIds.slice(0, AUTO_RECIPE_IMAGE_BATCH_SIZE);
+    const timer = window.setTimeout(() => {
+      autoImageResolutionBatchInFlight.current = true;
+      batchIds.forEach((recipeId) => autoImageResolutionRequested.current.add(recipeId));
+      setRecipeImageQueueFeedback({
+        phase: "loading",
+        message: "Completando imagenes para algunas recetas visibles de forma progresiva.",
+      });
+      void resolveRecipeImagesBatch(batchIds).finally(() => {
+        autoImageResolutionBatchInFlight.current = false;
+      });
+    }, AUTO_RECIPE_IMAGE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [activeView, filteredRecipes, recipeImageQueueFeedback.phase]);
+
   async function deleteRecipe(recipeId: string) {
     setLoading(true);
     try {
@@ -1284,11 +1393,10 @@ export default function Home() {
                 return (
                   <button
                     key={item.id}
-                    className={`min-w-fit rounded-lg border px-3 py-2 text-left transition lg:px-4 lg:py-3 ${
-                      isActive
-                        ? "border-leaf bg-leaf text-white shadow-soft"
-                        : "border-line text-ink/80 hover:border-leaf hover:text-leaf"
-                    }`}
+                    className={`min-w-fit rounded-lg border px-3 py-2 text-left transition lg:px-4 lg:py-3 ${isActive
+                      ? "border-leaf bg-leaf text-white shadow-soft"
+                      : "border-line text-ink/80 hover:border-leaf hover:text-leaf"
+                      }`}
                     onClick={() => setActiveView(item.id)}
                     type="button"
                   >
@@ -1402,8 +1510,10 @@ export default function Home() {
 
             {activeView === "recipes" ? (
               <RecipesView
+                autoResolvingRecipeIds={autoResolvingRecipeIds}
                 filteredRecipes={filteredRecipes}
                 difficultyFilter={recipeDifficultyFilter}
+                imageQueueFeedback={recipeImageQueueFeedback}
                 loading={loading}
                 onDeleteRecipe={deleteRecipe}
                 onOpenRecipe={openRecipeDetail}
@@ -1426,7 +1536,7 @@ export default function Home() {
 
             {activeView === "recipeDetail" ? (
               <RecipeDetailView
-                aiEnabled={Boolean(aiStatus?.configured)}
+                imageResolutionEnabled={Boolean(aiStatus?.images_enabled)}
                 imageResolutionPending={resolvingRecipeImageId === selectedRecipeId}
                 loading={loading}
                 onBack={() => setActiveView("recipes")}
@@ -1516,21 +1626,21 @@ function GenerationGuardModal({
   const content =
     guard === "empty"
       ? {
-          title: "Necesitas ingredientes para generar el menu",
-          description:
-            "No has introducido ingredientes todavia. Anade ingredientes a tu nevera o carga una base de prueba guardada en la base de datos.",
-        }
+        title: "Necesitas ingredientes para generar el menu",
+        description:
+          "No has introducido ingredientes todavia. Anade ingredientes a tu nevera o carga una base de prueba guardada en la base de datos.",
+      }
       : guard === "insufficient"
         ? {
-            title: "Hay pocos ingredientes en la nevera",
-            description: `Tienes ${ingredientCount} ingrediente${ingredientCount === 1 ? "" : "s"}. Para generar un menu semanal util necesitas al menos ${MIN_INGREDIENTS_FOR_MENU}.`,
-          }
+          title: "Hay pocos ingredientes en la nevera",
+          description: `Tienes ${ingredientCount} ingrediente${ingredientCount === 1 ? "" : "s"}. Para generar un menu semanal util necesitas al menos ${MIN_INGREDIENTS_FOR_MENU}.`,
+        }
         : guard === "excluded_insufficient"
           ? {
-              title: "Exclusiones demasiado restrictivas",
-              description: `Tras aplicar tus exclusiones quedan ${usableIngredientCount} ingredientes disponibles. Reduce exclusiones o anade mas ingredientes antes de generar el menu semanal.`,
-            }
-        : {
+            title: "Exclusiones demasiado restrictivas",
+            description: `Tras aplicar tus exclusiones quedan ${usableIngredientCount} ingredientes disponibles. Reduce exclusiones o anade mas ingredientes antes de generar el menu semanal.`,
+          }
+          : {
             title: "Se usara modo demo",
             description:
               "No hay una clave de Gemini configurada. La app puede continuar con un fallback local para que puedas probar el flujo completo sin depender de una clave externa.",
@@ -1581,7 +1691,7 @@ function GenerationGuardModal({
                 onClick={onAddDemoIngredients}
                 type="button"
               >
-                Anadir ingredientes de prueba
+                Añadir ingredientes de prueba
               </button>
             </>
           )}
@@ -1627,13 +1737,12 @@ function MenuGenerationBanner({ feedback }: { feedback: MenuGenerationFeedback }
       <span className="mt-1 inline-flex h-4 w-4 animate-spin rounded-full border-2 border-leaf/25 border-t-leaf" aria-hidden="true" />
     ) : (
       <span
-        className={`mt-1 inline-flex h-4 w-4 rounded-full ${
-          feedback.phase === "success"
-            ? "bg-leaf"
-            : feedback.phase === "rate_limited"
-              ? "bg-yolk"
-              : "bg-tomato"
-        }`}
+        className={`mt-1 inline-flex h-4 w-4 rounded-full ${feedback.phase === "success"
+          ? "bg-leaf"
+          : feedback.phase === "rate_limited"
+            ? "bg-yolk"
+            : "bg-tomato"
+          }`}
         aria-hidden="true"
       />
     );
@@ -1678,7 +1787,7 @@ function IngredientModal({
       <form className="w-full max-w-xl rounded-lg border border-line bg-white p-6 shadow-[0_24px_80px_rgba(31,37,34,0.24)]" onSubmit={onSubmit}>
         <p className="text-sm font-semibold uppercase text-leaf">Nevera</p>
         <h2 id="ingredient-modal-title" className="mt-2 text-2xl font-bold">
-          Anadir ingrediente
+          Añadir ingrediente
         </h2>
         <p className="mt-2 text-sm leading-6 text-ink/70">
           Registra alimentos reales para que el menu semanal pueda priorizar disponibilidad y caducidad.
@@ -1912,7 +2021,7 @@ function RecipeModal({
                 onClick={() => setForm({ ...form, ingredients: [...form.ingredients, { name: "", quantity: "" }] })}
                 type="button"
               >
-                Anadir ingrediente
+                Añadir ingrediente
               </button>
             </div>
             <div className="mt-4 grid gap-3">
@@ -2114,9 +2223,8 @@ function DashboardView({
                 return (
                   <article
                     key={dayIndex}
-                    className={`grid gap-3 rounded-lg border p-4 transition md:grid-cols-[130px_1fr] ${
-                      isToday ? "border-leaf bg-leaf/5 shadow-soft" : "border-line bg-paper"
-                    }`}
+                    className={`grid gap-3 rounded-lg border p-4 transition md:grid-cols-[130px_1fr] ${isToday ? "border-leaf bg-leaf/5 shadow-soft" : "border-line bg-paper"
+                      }`}
                   >
                     <div className="flex items-center justify-between gap-2 md:block">
                       <p className="font-semibold">{items[0]?.day_name}</p>
@@ -2279,7 +2387,7 @@ function MenuView({
                         <>
                           <p className="text-sm leading-6 text-ink/75">{item.recipe.description}</p>
                           <div className="mt-3 rounded-lg border border-leaf/20 bg-white px-3 py-2">
-                            <p className="text-xs font-semibold uppercase text-leaf">Por que este plato</p>
+                            <p className="text-xs font-semibold uppercase text-leaf">Por qué este plato</p>
                             <p className="mt-1 text-sm leading-6 text-ink/75">{item.explanation}</p>
                           </div>
                           <div className="mt-3 flex flex-wrap gap-2">
@@ -2384,7 +2492,7 @@ function IngredientsView({
             </p>
           </div>
           <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenAdd} type="button">
-            Anadir ingrediente
+            Añadir ingrediente
           </button>
         </div>
 
@@ -2396,9 +2504,8 @@ function IngredientsView({
             onChange={(event) => setQuery(event.target.value)}
           />
           <button
-            className={`rounded-lg border px-4 py-3 font-semibold ${
-              filtersOpen ? "border-leaf bg-leaf text-white" : "border-line bg-paper text-ink/75 hover:border-leaf hover:text-leaf"
-            }`}
+            className={`rounded-lg border px-4 py-3 font-semibold ${filtersOpen ? "border-leaf bg-leaf text-white" : "border-line bg-paper text-ink/75 hover:border-leaf hover:text-leaf"
+              }`}
             onClick={() => setFiltersOpen(!filtersOpen)}
             type="button"
           >
@@ -2414,9 +2521,8 @@ function IngredientsView({
                 {categories.map((item) => (
                   <button
                     key={item}
-                    className={`rounded border px-3 py-2 text-sm font-semibold ${
-                      category === item ? "border-leaf bg-leaf text-white" : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
-                    }`}
+                    className={`rounded border px-3 py-2 text-sm font-semibold ${category === item ? "border-leaf bg-leaf text-white" : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
+                      }`}
                     onClick={() => setCategory(item)}
                     type="button"
                   >
@@ -2449,7 +2555,7 @@ function IngredientsView({
           <p className="mt-2 text-sm leading-6">Anade ingredientes manualmente o carga algunos de prueba en la base de datos.</p>
           <div className="mt-4 flex flex-wrap gap-3">
             <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenAdd} type="button">
-              Anadir ingrediente
+              Añadir ingrediente
             </button>
             <button
               className="rounded-lg border border-line px-4 py-3 font-semibold text-ink/70 hover:border-leaf hover:text-leaf disabled:opacity-60"
@@ -2457,7 +2563,7 @@ function IngredientsView({
               onClick={onAddDemoIngredients}
               type="button"
             >
-              Anadir ingredientes de prueba
+              Añadir ingredientes de prueba
             </button>
           </div>
         </div>
@@ -2507,7 +2613,7 @@ function IngredientsView({
       ) : null}
       {categoryOptions.length === 0 ? (
         <div className="rounded-lg border border-yolk bg-yolk/20 p-4 text-sm text-ink/75">
-          No se han cargado categorias todavia. Revisa la conexion con la API antes de anadir ingredientes.
+          No se han cargado categorias todavia. Revisa la conexion con la API antes de añadir ingredientes.
         </div>
       ) : null}
     </section>
@@ -2515,8 +2621,10 @@ function IngredientsView({
 }
 
 function RecipesView({
+  autoResolvingRecipeIds,
   difficultyFilter,
   filteredRecipes,
+  imageQueueFeedback,
   loading,
   onDeleteRecipe,
   onOpenRecipe,
@@ -2532,8 +2640,10 @@ function RecipesView({
   timeFilter,
   totalRecipes,
 }: {
+  autoResolvingRecipeIds: string[];
   difficultyFilter: string;
   filteredRecipes: Recipe[];
+  imageQueueFeedback: RecipeImageQueueFeedback;
   loading: boolean;
   onDeleteRecipe: (recipeId: string) => void;
   onOpenRecipe: (recipe: Recipe) => void;
@@ -2564,8 +2674,13 @@ function RecipesView({
               {filteredRecipes.length} de {totalRecipes} recetas disponibles
             </p>
             <p className="text-xs leading-5 text-ink/55">
-              Las imagenes reales se resuelven bajo demanda al abrir una receta o desde su ficha. La grid no lanza busquedas automaticas para no gastar cuota de Gemini.
+              La grid completa imagenes de forma progresiva solo para unas pocas recetas visibles. El resto se resuelve bajo demanda desde el detalle.
             </p>
+            {imageQueueFeedback.message ? (
+              <p className={`text-xs leading-5 ${imageQueueFeedback.phase === "paused" ? "text-tomato" : "text-leaf"}`}>
+                {imageQueueFeedback.message}
+              </p>
+            ) : null}
           </div>
           <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenCreateRecipe} type="button">
             Anadir receta
@@ -2591,11 +2706,10 @@ function RecipesView({
 
           <button
             aria-expanded={showFilters}
-            className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border px-5 py-2 font-semibold transition ${
-              showFilters || activeFilterCount
-                ? "border-leaf bg-leaf text-white"
-                : "border-line bg-white text-ink hover:border-leaf hover:text-leaf"
-            }`}
+            className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border px-5 py-2 font-semibold transition ${showFilters || activeFilterCount
+              ? "border-leaf bg-leaf text-white"
+              : "border-line bg-white text-ink hover:border-leaf hover:text-leaf"
+              }`}
             onClick={() => setShowFilters((current) => !current)}
             type="button"
           >
@@ -2616,11 +2730,10 @@ function RecipesView({
                   {recipeTags.map((tag) => (
                     <button
                       key={tag}
-                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
-                        tagFilter === tag
-                          ? "border-leaf bg-leaf text-white"
-                          : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
-                      }`}
+                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${tagFilter === tag
+                        ? "border-leaf bg-leaf text-white"
+                        : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
+                        }`}
                       onClick={() => setTagFilter(tag)}
                       type="button"
                     >
@@ -2638,11 +2751,10 @@ function RecipesView({
                   {recipeDifficultyOptions.map((difficulty) => (
                     <button
                       key={difficulty}
-                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
-                        difficultyFilter === difficulty
-                          ? "border-leaf bg-leaf text-white"
-                          : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
-                      }`}
+                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${difficultyFilter === difficulty
+                        ? "border-leaf bg-leaf text-white"
+                        : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
+                        }`}
                       onClick={() => setDifficultyFilter(difficulty)}
                       type="button"
                     >
@@ -2658,11 +2770,10 @@ function RecipesView({
                   {recipeTimeOptions.map((time) => (
                     <button
                       key={time}
-                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
-                        timeFilter === time
-                          ? "border-leaf bg-leaf text-white"
-                          : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
-                      }`}
+                      className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${timeFilter === time
+                        ? "border-leaf bg-leaf text-white"
+                        : "border-line bg-white text-ink/70 hover:border-leaf hover:text-leaf"
+                        }`}
                       onClick={() => setTimeFilter(time)}
                       type="button"
                     >
@@ -2718,7 +2829,7 @@ function RecipesView({
               >
                 <div className="relative h-44 overflow-hidden bg-leaf/10">
                   <div className="h-full w-full transition duration-500 ease-out group-hover:scale-105">
-                    <RecipeVisualSurface compact recipe={recipe} />
+                    <RecipeVisualSurface compact loading={autoResolvingRecipeIds.includes(recipe.id)} recipe={recipe} />
                   </div>
                   <div className="absolute inset-0 bg-ink/0 transition duration-300 group-hover:bg-ink/10" />
                   {recipe.is_favorite ? (
@@ -2779,11 +2890,10 @@ function RecipesView({
                       Ver receta
                     </button>
                     <button
-                      className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-60 ${
-                        recipe.is_favorite
-                          ? "border-tomato bg-tomato/10 text-tomato"
-                          : "border-line text-ink/70 hover:border-tomato hover:text-tomato"
-                      }`}
+                      className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-60 ${recipe.is_favorite
+                        ? "border-tomato bg-tomato/10 text-tomato"
+                        : "border-line text-ink/70 hover:border-tomato hover:text-tomato"
+                        }`}
                       disabled={loading}
                       onClick={(event) => onToggleFavorite(recipe, event)}
                       type="button"
@@ -2813,7 +2923,7 @@ function RecipesView({
 }
 
 function RecipeDetailView({
-  aiEnabled,
+  imageResolutionEnabled,
   imageResolutionPending,
   loading,
   onBack,
@@ -2822,7 +2932,7 @@ function RecipeDetailView({
   onUseInMenu,
   recipe,
 }: {
-  aiEnabled: boolean;
+  imageResolutionEnabled: boolean;
   imageResolutionPending: boolean;
   loading: boolean;
   onBack: () => void;
@@ -2848,15 +2958,15 @@ function RecipeDetailView({
   }, [recipe]);
 
   useEffect(() => {
-    if (!recipe || !aiEnabled || imageResolutionPending) return;
+    if (!recipe || !imageResolutionEnabled || imageResolutionPending) return;
     if (autoResolveRequestedFor === recipe.id) return;
     if (!canAutoResolveRecipeImage(recipe)) return;
     setAutoResolveRequestedFor(recipe.id);
     void onResolveRecipeImage(recipe.id);
-  }, [aiEnabled, autoResolveRequestedFor, imageResolutionPending, onResolveRecipeImage, recipe]);
+  }, [imageResolutionEnabled, autoResolveRequestedFor, imageResolutionPending, onResolveRecipeImage, recipe]);
 
   const imageRetryCountdown =
-    !imageResolutionPending && (recipe?.image_lookup_status === "rate_limited" || recipe?.image_lookup_status === "upstream_error")
+    !imageResolutionPending && recipe?.image_lookup_status === "upstream_error"
       ? getRetryAfterSeconds(recipe.image_lookup_retry_after, imageStatusNow)
       : null;
 
@@ -2882,39 +2992,50 @@ function RecipeDetailView({
   const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
   const servings = getRecipeServings(recipe);
   const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
-  const canResolveImage = aiEnabled && !getRecipeImage(recipe) && !isEditing;
+  const canResolveImage = imageResolutionEnabled && !isEditing && Boolean(recipe.image_can_retry);
+  const hasImageCandidates = (recipe.image_candidate_count ?? 0) > 0;
+  const noMoreImageAlternatives =
+    Boolean(getRecipeImage(recipe)) &&
+    hasImageCandidates &&
+    !recipe.image_can_retry &&
+    (recipe.image_candidate_position ?? 0) >= (recipe.image_candidate_count ?? 0);
   const imageRetryLabel = imageRetryCountdown ? formatRetryCountdown(imageRetryCountdown) : null;
   const imageActionLabel =
     imageRetryLabel
       ? `Reintentar en ${imageRetryLabel}`
-      : recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found" || recipe.image_lookup_status === "upstream_error" || recipe.image_lookup_status === "rate_limited"
-      ? "Reintentar imagen real"
-      : "Buscar imagen real";
+      : getRecipeImage(recipe)
+        ? "Probar otra imagen"
+        : recipe.image_lookup_status === "pending" || recipe.image_lookup_status === null || recipe.image_lookup_status === undefined
+          ? "Buscar imagen"
+          : "Reintentar imagen";
   const detailImageStatus = imageResolutionPending ? "Buscando imagen real" : getRecipeImageStatus(recipe);
   const detailImageCaption = imageResolutionPending
-    ? "Estamos buscando una imagen real a partir de una pagina fuente relevante para esta receta."
+    ? "Estamos buscando paginas relevantes para esta receta y validando sus imagenes."
     : getRecipeImageCaption(recipe);
   const detailImageAltText = imageResolutionPending
     ? "Buscando una imagen real para esta receta."
     : getRecipeAltText(recipe);
   const detailImageReason = imageResolutionPending
-    ? "Consultando la pagina fuente propuesta por la IA y validando que la imagen sea real y reutilizable."
-    : imageRetryLabel && recipe.image_lookup_status === "rate_limited"
-      ? `La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini. Reintento disponible en ${imageRetryLabel}.`
-      : imageRetryLabel && recipe.image_lookup_status === "upstream_error"
-        ? `La resolucion de imagen encontro un error temporal. Conviene esperar ${imageRetryLabel} antes de reintentar.`
-    : getRecipeImageReason(recipe);
+    ? "Consultando paginas externas por HTTP y validando que la imagen sea real y reutilizable."
+    : imageRetryLabel && recipe.image_lookup_status === "upstream_error"
+      ? `La resolucion de imagen encontro un error temporal. Conviene esperar ${imageRetryLabel} antes de reintentar.`
+      : getRecipeImageReason(recipe);
   const detailImageSourceUrl = imageResolutionPending ? null : getRecipeImageSourceUrl(recipe);
+  const imageCandidateSummary =
+    recipe.image_candidate_count && recipe.image_candidate_count > 0
+      ? `Alternativa ${recipe.image_candidate_position ?? 0} de ${recipe.image_candidate_count}`
+      : null;
+  const canDiscardImage = imageResolutionEnabled && !isEditing && noMoreImageAlternatives;
 
   function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
     setDraft((current) =>
       current
         ? {
-            ...current,
-            ingredients: current.ingredients.map((ingredient, itemIndex) =>
-              itemIndex === index ? { ...ingredient, [field]: value } : ingredient,
-            ),
-          }
+          ...current,
+          ingredients: current.ingredients.map((ingredient, itemIndex) =>
+            itemIndex === index ? { ...ingredient, [field]: value } : ingredient,
+          ),
+        }
         : current,
     );
   }
@@ -2923,9 +3044,9 @@ function RecipeDetailView({
     setDraft((current) =>
       current
         ? {
-            ...current,
-            ingredients: current.ingredients.filter((_, itemIndex) => itemIndex !== index),
-          }
+          ...current,
+          ingredients: current.ingredients.filter((_, itemIndex) => itemIndex !== index),
+        }
         : current,
     );
   }
@@ -2934,9 +3055,9 @@ function RecipeDetailView({
     setDraft((current) =>
       current
         ? {
-            ...current,
-            steps: current.steps.map((step, itemIndex) => (itemIndex === index ? value : step)),
-          }
+          ...current,
+          steps: current.steps.map((step, itemIndex) => (itemIndex === index ? value : step)),
+        }
         : current,
     );
   }
@@ -2945,9 +3066,9 @@ function RecipeDetailView({
     setDraft((current) =>
       current
         ? {
-            ...current,
-            steps: current.steps.filter((_, itemIndex) => itemIndex !== index),
-          }
+          ...current,
+          steps: current.steps.filter((_, itemIndex) => itemIndex !== index),
+        }
         : current,
     );
   }
@@ -2979,6 +3100,21 @@ function RecipeDetailView({
       return;
     }
     const updated = await onUpdateRecipe(recipe.id, { is_favorite: !recipe.is_favorite });
+    if (updated) {
+      setDraft(buildRecipeEditForm(updated));
+    }
+  }
+
+  async function discardRecipeImage() {
+    if (!recipe) return;
+    const updated = await onUpdateRecipe(recipe.id, {
+      image_url: null,
+      image_source_url: null,
+      image_alt_text: null,
+      image_lookup_status: "attempts_exhausted",
+      image_lookup_reason:
+        "Has descartado todas las alternativas de imagen disponibles para esta receta. Se mostrara un placeholder.",
+    });
     if (updated) {
       setDraft(buildRecipeEditForm(updated));
     }
@@ -3176,14 +3312,29 @@ function RecipeDetailView({
                 <span className="text-xs font-semibold uppercase text-ink/55">
                   {detailImageStatus}
                 </span>
+                {imageCandidateSummary ? (
+                  <span className="text-xs font-semibold uppercase text-ink/45">
+                    {imageCandidateSummary}
+                  </span>
+                ) : null}
                 {canResolveImage ? (
                   <button
                     className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={imageResolutionPending || loading || Boolean(imageRetryLabel)}
+                    disabled={imageResolutionPending || loading || Boolean(imageRetryLabel) || !recipe.image_can_retry}
                     onClick={() => void onResolveRecipeImage(recipe.id, true)}
                     type="button"
                   >
                     {imageResolutionPending ? "Buscando..." : imageActionLabel}
+                  </button>
+                ) : null}
+                {canDiscardImage ? (
+                  <button
+                    className="rounded-lg border border-line px-3 py-2 text-xs font-semibold text-ink/70 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={imageResolutionPending || loading}
+                    onClick={() => void discardRecipeImage()}
+                    type="button"
+                  >
+                    Dejar sin foto
                   </button>
                 ) : null}
               </div>
@@ -3226,7 +3377,7 @@ function RecipeDetailView({
                 onClick={() => setDraft((current) => (current ? { ...current, ingredients: [...current.ingredients, { name: "", quantity: "" }] } : current))}
                 type="button"
               >
-                Anadir ingrediente
+                Añadir ingrediente
               </button>
             ) : null}
           </div>
@@ -3376,11 +3527,10 @@ function PreferencesView({
             return (
               <button
                 key={option.name}
-                className={`min-h-20 rounded-lg border px-4 py-4 text-left transition ${
-                  selected
-                    ? "border-leaf bg-leaf/5 shadow-soft"
-                    : "border-line bg-white hover:border-leaf hover:bg-paper"
-                }`}
+                className={`min-h-20 rounded-lg border px-4 py-4 text-left transition ${selected
+                  ? "border-leaf bg-leaf/5 shadow-soft"
+                  : "border-line bg-white hover:border-leaf hover:bg-paper"
+                  }`}
                 onClick={() => setSettings((current) => ({ ...current, dietType: option.name }))}
                 type="button"
               >
@@ -3489,11 +3639,10 @@ function PreferencesView({
                 {excludedIngredientCategories.map((category) => (
                   <button
                     key={category}
-                    className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
-                      excludedIngredientCategory === category
-                        ? "border-leaf bg-leaf text-white"
-                        : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
-                    }`}
+                    className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${excludedIngredientCategory === category
+                      ? "border-leaf bg-leaf text-white"
+                      : "border-line bg-white text-ink/75 hover:border-leaf hover:text-leaf"
+                      }`}
                     onClick={() => setExcludedIngredientCategory(category)}
                     type="button"
                   >
@@ -3511,9 +3660,8 @@ function PreferencesView({
                     return (
                       <label
                         key={ingredient.id}
-                        className={`grid cursor-pointer grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-3 transition ${
-                          selected ? "bg-tomato/5" : "bg-white hover:bg-paper"
-                        }`}
+                        className={`grid cursor-pointer grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-3 transition ${selected ? "bg-tomato/5" : "bg-white hover:bg-paper"
+                          }`}
                       >
                         <input
                           checked={selected}
@@ -3571,9 +3719,8 @@ function PreferencesView({
           {goalOptions.map((goal) => (
             <label
               key={goal}
-              className={`flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 transition ${
-                settings.goals.includes(goal) ? "bg-paper" : "hover:bg-paper"
-              }`}
+              className={`flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 transition ${settings.goals.includes(goal) ? "bg-paper" : "hover:bg-paper"
+                }`}
             >
               <input
                 checked={settings.goals.includes(goal)}
@@ -3601,11 +3748,10 @@ function PreferencesView({
             return (
               <button
                 key={option.name}
-                className={`min-h-24 rounded-lg border px-4 py-4 text-center transition ${
-                  selected
-                    ? "border-leaf bg-leaf/5 shadow-soft"
-                    : "border-line bg-white hover:border-leaf hover:bg-paper"
-                }`}
+                className={`min-h-24 rounded-lg border px-4 py-4 text-center transition ${selected
+                  ? "border-leaf bg-leaf/5 shadow-soft"
+                  : "border-line bg-white hover:border-leaf hover:bg-paper"
+                  }`}
                 onClick={() => setSettings((current) => ({ ...current, varietyLevel: option.name }))}
                 type="button"
               >

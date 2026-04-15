@@ -7,7 +7,7 @@ import time
 from functools import lru_cache
 from typing import Any
 from unicodedata import combining, normalize as unicode_normalize
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 
@@ -27,7 +27,162 @@ HTTP_USER_AGENT = (
 EXPECTED_WEEKLY_ITEMS = len(DAYS) * len(MEAL_TYPES)
 MAX_SLOT_REPAIR_ATTEMPTS = 4
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30
+MAX_IMAGE_CANDIDATES = 6
+MAX_IMAGE_ATTEMPTS = 3
+MAX_IMAGE_SEARCH_RESULTS = 4
+DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 _gemini_rate_limit_until = 0.0
+IMAGE_DISH_TYPE_TERMS = {
+    "ensalada",
+    "bowl",
+    "salteado",
+    "sopa",
+    "crema",
+    "pure",
+    "tortilla",
+    "revuelto",
+    "arroz",
+    "pasta",
+    "curry",
+    "wok",
+    "guiso",
+    "hamburguesa",
+    "wrap",
+    "sandwich",
+    "tosta",
+    "pizza",
+    "quiche",
+    "parfait",
+    "postre",
+    "tostada",
+}
+IMAGE_QUERY_STOPWORDS = {
+    "de",
+    "del",
+    "la",
+    "las",
+    "el",
+    "los",
+    "con",
+    "y",
+    "al",
+    "a",
+    "en",
+    "fresco",
+    "fresca",
+    "suave",
+    "casero",
+    "casera",
+    "rapido",
+    "rapida",
+    "ligero",
+    "ligera",
+    "facil",
+    "simple",
+}
+IMAGE_FRUIT_TERMS = {
+    "fruta",
+    "frutas",
+    "fresa",
+    "fresas",
+    "platano",
+    "banana",
+    "manzana",
+    "mango",
+    "pera",
+    "kiwi",
+    "melon",
+    "sandia",
+    "arandano",
+    "arandanos",
+    "frambuesa",
+    "frambuesas",
+    "uva",
+    "uvas",
+    "naranja",
+    "mandarina",
+    "melocoton",
+    "melocotones",
+    "pina",
+    "frutos",
+    "rojos",
+}
+IMAGE_YOGURT_TERMS = {"yogur", "yogurt", "yoghurt"}
+IMAGE_DAIRY_TERMS = {
+    *IMAGE_YOGURT_TERMS,
+    "queso",
+    "quesos",
+    "requeson",
+    "ricotta",
+    "mascarpone",
+    "leche",
+    "crema",
+}
+
+VEGETARIAN_FORBIDDEN_TERMS = [
+    "carne",
+    "pollo",
+    "pavo",
+    "cerdo",
+    "lomo",
+    "bacon",
+    "jamon",
+    "chorizo",
+    "salchicha",
+    "ternera",
+    "vacuno",
+    "res",
+    "cordero",
+    "atun",
+    "salmon",
+    "merluza",
+    "bacalao",
+    "sardina",
+    "anchoa",
+    "pescado",
+    "marisco",
+    "gamba",
+    "gambas",
+    "langostino",
+    "langostinos",
+    "mejillon",
+    "mejillones",
+    "almeja",
+    "almejas",
+    "calamar",
+    "pulpo",
+]
+VEGAN_EXTRA_FORBIDDEN_TERMS = [
+    "huevo",
+    "huevos",
+    "queso",
+    "leche",
+    "yogur",
+    "yoghurt",
+    "mantequilla",
+    "nata",
+    "crema",
+    "miel",
+]
+INTERNAL_EXPLANATION_MARKERS = (
+    "se debe",
+    "se deben",
+    "se propone",
+    "se prioriza",
+    "priorizar ingredientes",
+    "despensa",
+    "contexto",
+    "prompt",
+    "restric",
+    "regla",
+    "obligatori",
+    "lista cerrada",
+    "ingredientes principales",
+    "apoyandose",
+    "apoyandose en",
+    "permitid",
+    "validacion",
+)
 
 
 class WeeklyMenuResolutionError(Exception):
@@ -244,23 +399,490 @@ def generate_replacement(
     return fallback
 
 
+def infer_dietary_rules(preferences_text: str) -> dict[str, Any]:
+    normalized_preferences = _normalize_free_text(preferences_text or "")
+    is_vegan = any(label in normalized_preferences for label in {"vegano", "vegana"})
+    is_vegetarian = is_vegan or any(label in normalized_preferences for label in {"vegetariano", "vegetariana"})
+
+    labels: list[str] = []
+    forbidden_terms: list[str] = []
+    if is_vegetarian:
+        labels.append("vegetariana")
+        forbidden_terms.extend(VEGETARIAN_FORBIDDEN_TERMS)
+    if is_vegan:
+        labels.append("vegana")
+        forbidden_terms.extend(VEGAN_EXTRA_FORBIDDEN_TERMS)
+
+    unique_forbidden_terms = _unique_texts(forbidden_terms)
+    return {
+        "labels": labels,
+        "forbidden_terms": unique_forbidden_terms,
+        "strict": bool(labels),
+    }
+
+
+def recipe_conflicts_with_dietary_rules(recipe: dict[str, Any], dietary_rules: dict[str, Any] | None) -> dict[str, Any] | None:
+    rules = dietary_rules or {}
+    forbidden_terms = [
+        _normalize_name(str(term))
+        for term in (rules.get("forbidden_terms") or [])
+        if str(term).strip()
+    ]
+    if not forbidden_terms:
+        return None
+
+    title_hits: list[str] = []
+    ingredient_hits: list[str] = []
+    title = str(recipe.get("title") or "").strip()
+    title_normalized = _normalize_name(title)
+    if title_normalized and any(_matches_name(title_normalized, term) for term in forbidden_terms):
+        title_hits.append(title)
+
+    for value in recipe.get("ingredients") or []:
+        ingredient_name = str(_ingredient_name_from_value(value) or "").strip()
+        if not ingredient_name:
+            continue
+        normalized_name = _normalize_name(ingredient_name)
+        if any(_matches_name(normalized_name, term) for term in forbidden_terms):
+            ingredient_hits.append(ingredient_name)
+
+    hits = ingredient_hits or title_hits
+    unique_hits = _unique_texts(hits)
+    if not unique_hits:
+        return None
+
+    return {
+        "invalid_reason": "dietary_restriction_violation",
+        "invalid_ingredients": unique_hits,
+        "rule_labels": list(rules.get("labels") or []),
+    }
+
+
 def resolve_recipe_image(recipe: dict[str, Any]) -> dict[str, Any] | None:
-    prompt = _build_image_lookup_prompt(recipe)
-    payload, call_meta = _call_gemini_with_meta(
-        prompt,
-        use_google_search=settings.gemini_enable_google_search,
-        timeout_seconds=35,
-    )
-    recipe_title = str(recipe.get("title") or "receta")
-    if payload is None:
-        return _image_lookup_error_payload(recipe_title, call_meta)
-    if not isinstance(payload, dict):
+    recipe_title = str(recipe.get("title") or "receta").strip() or "receta"
+    cached_candidates = _cached_image_candidates(recipe)
+    current_index = _coerce_int(recipe.get("image_candidate_index"))
+    attempt_count = max(_coerce_int(recipe.get("image_lookup_attempt_count")), 0)
+
+    if cached_candidates:
+        next_index = 0 if current_index < 0 else current_index + 1
+        if next_index < len(cached_candidates):
+            return _image_candidate_payload(
+                recipe_title=recipe_title,
+                candidates=cached_candidates,
+                candidate_index=next_index,
+                attempt_count=max(attempt_count, 1),
+            )
+        return _image_last_cached_candidate_payload(
+            recipe_title=recipe_title,
+            candidates=cached_candidates,
+            current_index=current_index,
+            attempt_count=max(attempt_count, 1),
+        )
+
+    if attempt_count >= MAX_IMAGE_ATTEMPTS:
+        return _image_attempts_exhausted_payload(recipe_title, [], attempt_count)
+
+    search_result = _search_recipe_source_pages(recipe)
+    if search_result["status"] == "upstream_error":
         return {
             **_empty_image_lookup(),
             "image_lookup_status": "upstream_error",
-            "image_lookup_reason": "La IA devolvio una respuesta no valida al buscar la imagen de la receta.",
+            "image_lookup_reason": search_result["reason"],
+            "image_lookup_attempt_count": attempt_count,
+            "image_candidates": [],
+            "image_candidate_index": None,
         }
-    return _normalize_image_lookup(payload, recipe_title)
+
+    candidates, outcome = _collect_image_candidates_for_recipe(recipe_title, search_result["source_urls"])
+    if candidates:
+        return _image_candidate_payload(
+            recipe_title=recipe_title,
+            candidates=candidates,
+            candidate_index=0,
+            attempt_count=1,
+        )
+
+    final_status = "invalid" if outcome == "invalid" else "not_found"
+    final_reason = (
+        "Se encontraron paginas relacionadas con la receta, pero ninguna expuso una imagen valida para reutilizar."
+        if final_status == "invalid"
+        else "No se encontraron paginas con una imagen reutilizable para esta receta."
+    )
+    return {
+        **_empty_image_lookup(),
+        "image_lookup_status": final_status,
+        "image_lookup_reason": final_reason,
+        "image_lookup_attempt_count": 1,
+        "image_candidates": [],
+        "image_candidate_index": None,
+    }
+
+
+def _cached_image_candidates(recipe: dict[str, Any]) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for raw_candidate in recipe.get("image_candidates") or []:
+        if not isinstance(raw_candidate, dict):
+            continue
+        image_url = _clean_http_url(raw_candidate.get("image_url"))
+        image_source_url = _clean_http_url(raw_candidate.get("image_source_url"))
+        image_alt_text = _clean_text(raw_candidate.get("image_alt_text"), 240)
+        if not image_url or not image_source_url or image_url in seen_urls:
+            continue
+        seen_urls.add(image_url)
+        candidates.append(
+            {
+                "image_url": image_url,
+                "image_source_url": image_source_url,
+                "image_alt_text": image_alt_text or f"Imagen de {recipe.get('title') or 'la receta'}.",
+            }
+        )
+        if len(candidates) >= MAX_IMAGE_CANDIDATES:
+            break
+    return candidates
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _image_candidate_payload(
+    *,
+    recipe_title: str,
+    candidates: list[dict[str, str]],
+    candidate_index: int,
+    attempt_count: int,
+) -> dict[str, Any]:
+    candidate = candidates[candidate_index]
+    return {
+        "image_url": candidate["image_url"],
+        "image_source_url": candidate["image_source_url"],
+        "image_alt_text": candidate.get("image_alt_text") or f"Imagen de {recipe_title}.",
+        "image_lookup_status": "found",
+        "image_lookup_reason": (
+            f"Mostrando la alternativa {candidate_index + 1} de {len(candidates)} obtenida por busqueda HTTP a partir del nombre de la receta."
+        ),
+        "image_candidates": candidates,
+        "image_candidate_index": candidate_index,
+        "image_lookup_attempt_count": attempt_count,
+    }
+
+
+def _image_attempts_exhausted_payload(
+    recipe_title: str,
+    candidates: list[dict[str, str]],
+    attempt_count: int,
+) -> dict[str, Any]:
+    exhausted_index = None
+    if candidates:
+        exhausted_index = min(max(attempt_count - 1, 0), len(candidates) - 1)
+    return {
+        **_empty_image_lookup(),
+        "image_lookup_status": "attempts_exhausted",
+        "image_lookup_reason": (
+            f"Se agotaron los {MAX_IMAGE_ATTEMPTS} intentos de busqueda HTTP para {recipe_title}. "
+            "La receta seguira mostrando un placeholder."
+        ),
+        "image_candidates": candidates,
+        "image_candidate_index": exhausted_index,
+        "image_lookup_attempt_count": max(attempt_count, MAX_IMAGE_ATTEMPTS),
+    }
+
+
+def _image_last_cached_candidate_payload(
+    *,
+    recipe_title: str,
+    candidates: list[dict[str, str]],
+    current_index: int,
+    attempt_count: int,
+) -> dict[str, Any]:
+    last_index = len(candidates) - 1
+    candidate_index = current_index if 0 <= current_index <= last_index else last_index
+    candidate = candidates[candidate_index]
+    return {
+        "image_url": candidate["image_url"],
+        "image_source_url": candidate["image_source_url"],
+        "image_alt_text": candidate.get("image_alt_text") or f"Imagen de {recipe_title}.",
+        "image_lookup_status": "found",
+        "image_lookup_reason": (
+            f"Estas viendo la ultima alternativa disponible ({candidate_index + 1} de {len(candidates)}) para {recipe_title}."
+        ),
+        "image_candidates": candidates,
+        "image_candidate_index": candidate_index,
+        "image_lookup_attempt_count": attempt_count,
+    }
+
+
+def _search_recipe_source_pages(recipe: dict[str, Any]) -> dict[str, Any]:
+    queries = _image_search_queries(recipe)
+    collected_urls: list[str] = []
+    saw_upstream_error = False
+    for query in queries:
+        result = _search_duckduckgo_html(query)
+        if result["status"] == "upstream_error":
+            saw_upstream_error = True
+            continue
+        for source_url in result["source_urls"]:
+            if source_url not in collected_urls:
+                collected_urls.append(source_url)
+            if len(collected_urls) >= MAX_IMAGE_SEARCH_RESULTS:
+                break
+        if len(collected_urls) >= MAX_IMAGE_SEARCH_RESULTS:
+            break
+
+    if collected_urls:
+        return {"status": "ok", "source_urls": collected_urls}
+    if saw_upstream_error:
+        return {
+            "status": "upstream_error",
+            "source_urls": [],
+            "reason": "No se pudo consultar el buscador HTTP de imagenes en este momento.",
+        }
+    return {"status": "ok", "source_urls": []}
+
+
+def _image_search_queries(recipe: dict[str, Any]) -> list[str]:
+    title = str(recipe.get("title") or "").strip()
+    if not title:
+        return []
+    dish_type = _recipe_image_dish_type(title)
+    primary_terms = _recipe_image_primary_terms(recipe)
+    semantic_queries = _recipe_image_semantic_queries(recipe, dish_type, primary_terms)
+    queries: list[str] = [f"{title} receta"]
+    if dish_type and primary_terms:
+        queries.append(f"{dish_type} {' '.join(primary_terms[:2])} receta")
+    elif primary_terms:
+        queries.append(f"{title} {' '.join(primary_terms[:2])} receta")
+    if dish_type:
+        queries.append(f"{dish_type} receta")
+    queries.extend(semantic_queries)
+    return _unique_texts(queries)[:6]
+
+
+def _recipe_image_dish_type(title: str) -> str:
+    normalized_title = _normalize_name(title)
+    for token in normalized_title.split():
+        if token in IMAGE_DISH_TYPE_TERMS:
+            return token
+    return ""
+
+
+def _recipe_image_primary_terms(recipe: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    title = str(recipe.get("title") or "").strip()
+    normalized_title = _normalize_name(title)
+    for token in normalized_title.split():
+        if token in IMAGE_QUERY_STOPWORDS or token in IMAGE_DISH_TYPE_TERMS or len(token) < 4:
+            continue
+        terms.append(token)
+
+    for value in recipe.get("ingredients") or []:
+        ingredient_name = _normalize_name(_ingredient_name_from_value(value))
+        if not ingredient_name:
+            continue
+        first_token = next(
+            (
+                token
+                for token in ingredient_name.split()
+                if token not in IMAGE_QUERY_STOPWORDS and len(token) >= 4
+            ),
+            "",
+        )
+        if first_token:
+            terms.append(first_token)
+
+    return _unique_texts(terms)[:3]
+
+
+def _recipe_image_semantic_queries(
+    recipe: dict[str, Any],
+    dish_type: str,
+    primary_terms: list[str],
+) -> list[str]:
+    tokens = set(_recipe_image_tokens(recipe))
+    queries: list[str] = []
+
+    if tokens & IMAGE_YOGURT_TERMS and tokens & IMAGE_FRUIT_TERMS:
+        queries.extend(
+            [
+                "yogur con frutas receta",
+                "copa de yogur con frutas receta",
+                "parfait de yogur con frutas receta",
+                "postre de yogur con frutas receta",
+            ]
+        )
+        if "queso" in tokens or "quesos" in tokens:
+            queries.append("yogur con frutas y queso fresco receta")
+
+    if dish_type == "ensalada":
+        if primary_terms:
+            queries.append(f"ensalada {' '.join(primary_terms[:2])} receta")
+        queries.append("ensalada fresca receta")
+
+    if dish_type == "bowl":
+        if primary_terms:
+            queries.append(f"bowl {' '.join(primary_terms[:2])} receta")
+        queries.append("bowl saludable receta")
+
+    if dish_type in {"tosta", "tostada"}:
+        if primary_terms:
+            queries.append(f"tostada {' '.join(primary_terms[:2])} receta")
+        queries.append("tostada receta")
+
+    if not dish_type and tokens & IMAGE_DAIRY_TERMS and tokens & IMAGE_FRUIT_TERMS:
+        queries.extend(
+            [
+                "postre lacteo con frutas receta",
+                "bol de yogur con frutas receta",
+            ]
+        )
+
+    return queries
+
+
+def _recipe_image_tokens(recipe: dict[str, Any]) -> list[str]:
+    tokens: list[str] = []
+    title = _normalize_name(str(recipe.get("title") or ""))
+    tokens.extend(token for token in title.split() if token and token not in IMAGE_QUERY_STOPWORDS)
+
+    for value in recipe.get("ingredients") or []:
+        ingredient_name = _normalize_name(_ingredient_name_from_value(value))
+        if not ingredient_name:
+            continue
+        tokens.extend(
+            token
+            for token in ingredient_name.split()
+            if token and token not in IMAGE_QUERY_STOPWORDS
+        )
+    return _unique_texts(tokens)
+
+
+def _search_duckduckgo_html(query: str) -> dict[str, Any]:
+    headers = {
+        "User-Agent": HTTP_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    }
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True, headers=headers) as client:
+            response = client.get(DUCKDUCKGO_HTML_SEARCH_URL, params={"q": query})
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        record_exception(
+            "ai",
+            "Fallo buscando paginas para imagenes de recetas por HTTP",
+            exc,
+            {"query": query},
+        )
+        return {"status": "upstream_error", "source_urls": []}
+
+    urls: list[str] = []
+    for match in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"', response.text):
+        target_url = _extract_search_result_url(unescape(match.group(1)))
+        if not target_url or target_url in urls:
+            continue
+        parsed = urlparse(target_url)
+        hostname = (parsed.netloc or "").lower()
+        if not hostname or any(blocked in hostname for blocked in {"duckduckgo.com", "pinterest.", "facebook.", "instagram.", "tiktok.", "youtube."}):
+            continue
+        urls.append(target_url)
+        if len(urls) >= MAX_IMAGE_SEARCH_RESULTS:
+            break
+
+    return {"status": "ok", "source_urls": urls}
+
+
+def _extract_search_result_url(raw_href: str) -> str | None:
+    if not raw_href:
+        return None
+    absolute_href = urljoin("https://duckduckgo.com", raw_href)
+    parsed = urlparse(absolute_href)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg", [None])[0]
+        if target:
+            return _clean_http_url(unquote(target))
+    return _clean_http_url(absolute_href)
+
+
+def _collect_image_candidates_for_recipe(
+    recipe_title: str,
+    source_urls: list[str],
+) -> tuple[list[dict[str, str]], str]:
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    found_any_image_reference = False
+    found_any_page = False
+    for source_url in source_urls:
+        valid_candidates, page_outcome = _valid_image_candidates_from_source_page(source_url, recipe_title)
+        if page_outcome in {"found", "invalid"}:
+            found_any_page = True
+        if page_outcome == "invalid":
+            found_any_image_reference = True
+        for candidate in valid_candidates:
+            image_url = candidate["image_url"]
+            if image_url in seen_urls:
+                continue
+            seen_urls.add(image_url)
+            candidates.append(candidate)
+            found_any_image_reference = True
+            found_any_page = True
+            if len(candidates) >= MAX_IMAGE_CANDIDATES:
+                return candidates, "found"
+    if found_any_image_reference:
+        return candidates, "invalid"
+    if found_any_page:
+        return candidates, "not_found"
+    return candidates, "not_found"
+
+
+def _valid_image_candidates_from_source_page(source_url: str, recipe_title: str) -> tuple[list[dict[str, str]], str]:
+    page = _fetch_source_page(source_url)
+    if page is None:
+        return [], "not_found"
+
+    final_source_url = page["source_url"]
+    raw_candidates = _extract_image_candidates_from_html(page["html"], final_source_url)
+    if not raw_candidates:
+        return [], "not_found"
+
+    valid_candidates: list[dict[str, str]] = []
+    for candidate in raw_candidates:
+        resolved_image_url = _resolve_image_url(candidate)
+        if not resolved_image_url:
+            continue
+        if not _is_promising_recipe_image(resolved_image_url):
+            continue
+        valid_candidates.append(
+            {
+                "image_url": resolved_image_url,
+                "image_source_url": final_source_url,
+                "image_alt_text": f"Imagen de {recipe_title}.",
+            }
+        )
+    return (valid_candidates, "found") if valid_candidates else ([], "invalid")
+
+
+def _is_promising_recipe_image(image_url: str) -> bool:
+    parsed = urlparse(image_url)
+    hostname = (parsed.netloc or "").lower()
+    path = unquote(parsed.path or "").lower()
+    candidate_text = f"{hostname}{path}"
+    if any(blocked_host in hostname for blocked_host in {"gravatar.com"}):
+        return False
+    blocked_markers = {
+        "logo",
+        "avatar",
+        "gravatar",
+        "icon",
+        "favicon",
+        "sprite",
+        "pixel",
+        "placeholder",
+    }
+    return not any(marker in candidate_text for marker in blocked_markers)
 
 
 def _call_gemini_with_meta(
@@ -433,18 +1055,20 @@ def _build_weekly_prompt(
         "Reglas obligatorias:\n"
         "1. Usa los ingredientes disponibles como base principal del menu.\n"
         "2. Excluye por completo cualquier ingrediente marcado por el usuario.\n"
-        "3. Prioriza recetas guardadas compatibles y, dentro de ellas, las favoritas compatibles no recientes.\n"
-        "4. Evita repetir titulos que aparezcan en las recetas recientes.\n"
-        "5. Solo crea recetas nuevas cuando no haya suficientes recetas guardadas compatibles para cubrir los huecos.\n"
-        "6. Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos`. No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
-        "7. En el campo `ingredients` solo puedes incluir ingredientes de esa lista cerrada o ingredientes de `despensa_basica_permitida`, nunca otros ingredientes.\n"
-        "8. La despensa basica solo puede actuar como apoyo. No la conviertas en la base real del plato ni en el elemento que define el tipo de receta.\n"
-        "9. Los ingredientes de `despensa_basica_apoyo_libre` son apoyos ultrabasicos y no cuentan para el limite de despensa mientras sigan siendo secundarios.\n"
-        "10. No uses mas ingredientes de despensa contables que ingredientes reales de nevera en una receta. Como maximo usa `politica_despensa.max_pantry_ingredients_per_recipe` ingredientes de despensa contables.\n"
-        "11. Solo puedes usar como maximo `politica_despensa.max_structural_pantry_ingredients_per_recipe` ingrediente estructural de despensa por receta. Los ingredientes estructurales estan en `despensa_basica_estructural_limitada`.\n"
-        "12. Si una receta solo usa 1 ingrediente de nevera, apoyate solo en apoyos ligeros de `despensa_basica_apoyo` y nunca en ingredientes estructurales de despensa.\n"
-        "13. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
-        "14. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
+        "3. Respeta de forma estricta `restricciones_dieta_duras`. Si una receta incluye cualquier ingrediente de `ingredientes_prohibidos_por_dieta`, esa receta es invalida.\n"
+        "4. Prioriza recetas guardadas compatibles y, dentro de ellas, las favoritas compatibles no recientes.\n"
+        "5. Evita repetir titulos que aparezcan en las recetas recientes.\n"
+        "6. Solo crea recetas nuevas cuando no haya suficientes recetas guardadas compatibles para cubrir los huecos.\n"
+        "7. Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos`. No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
+        "8. En el campo `ingredients` solo puedes incluir ingredientes de esa lista cerrada o ingredientes de `despensa_basica_permitida`, nunca otros ingredientes.\n"
+        "9. La despensa basica solo puede actuar como apoyo. No la conviertas en la base real del plato ni en el elemento que define el tipo de receta.\n"
+        "10. Los ingredientes de `despensa_basica_apoyo_libre` son apoyos ultrabasicos y no cuentan para el limite de despensa mientras sigan siendo secundarios.\n"
+        "11. No uses mas ingredientes de despensa contables que ingredientes reales de nevera en una receta. Como maximo usa `politica_despensa.max_pantry_ingredients_per_recipe` ingredientes de despensa contables.\n"
+        "12. Solo puedes usar como maximo `politica_despensa.max_structural_pantry_ingredients_per_recipe` ingrediente estructural de despensa por receta. Los ingredientes estructurales estan en `despensa_basica_estructural_limitada`.\n"
+        "13. Si una receta solo usa 1 ingrediente de nevera, apoyate solo en apoyos ligeros de `despensa_basica_apoyo` y nunca en ingredientes estructurales de despensa.\n"
+        "14. La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
+        "15. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
+        "16. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -480,13 +1104,15 @@ def _build_weekly_retry_prompt(
         "Reglas obligatorias:\n"
         "1. Usa los ingredientes disponibles como base principal del menu.\n"
         "2. Excluye por completo cualquier ingrediente marcado por el usuario.\n"
-        "3. No uses ingredientes principales fuera de `ingredientes_principales_permitidos`.\n"
-        "4. En `ingredients` solo puedes incluir ingredientes disponibles o `despensa_basica_permitida`.\n"
-        "5. Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
-        "6. No uses mas ingredientes de despensa contables que ingredientes de nevera y respeta `politica_despensa`.\n"
-        "7. Si solo hay 1 ingrediente de nevera en la receta, no uses ingredientes estructurales de `despensa_basica_estructural_limitada`.\n"
-        "8. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
-        "9. Evita repetir titulos de recetas recientes.\n"
+        "3. Respeta de forma estricta `restricciones_dieta_duras`. Si una receta incluye cualquier ingrediente de `ingredientes_prohibidos_por_dieta`, esa receta es invalida.\n"
+        "4. No uses ingredientes principales fuera de `ingredientes_principales_permitidos`.\n"
+        "5. En `ingredients` solo puedes incluir ingredientes disponibles o `despensa_basica_permitida`.\n"
+        "6. Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
+        "7. No uses mas ingredientes de despensa contables que ingredientes de nevera y respeta `politica_despensa`.\n"
+        "8. Si solo hay 1 ingrediente de nevera en la receta, no uses ingredientes estructurales de `despensa_basica_estructural_limitada`.\n"
+        "9. La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
+        "10. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
+        "11. Evita repetir titulos de recetas recientes.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -506,37 +1132,17 @@ def _build_replacement_prompt(
         "Propone un unico plato de sustitucion para un menu semanal. "
         "Devuelve solo JSON valido, sin markdown.\n"
         "Usa ingredientes disponibles, respeta exclusiones, prioriza favoritas compatibles y evita recetas recientes.\n"
+        "Respeta de forma estricta `restricciones_dieta_duras`. Si una receta incluye cualquier ingrediente de `ingredientes_prohibidos_por_dieta`, esa receta es invalida.\n"
         "Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos` o ingredientes de `despensa_basica_permitida`.\n"
         "No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
         "Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
         "La despensa basica solo puede apoyar: no debe haber mas ingredientes de despensa contables que de nevera, y si solo usas 1 ingrediente de nevera no puedes apoyarte en ingredientes estructurales de despensa.\n"
+        "La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"explanation\":\"...\",\"recipe\":{\"title\":\"...\",\"description\":\"...\",\"ingredients\":[\"...\"],"
         "\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25,\"difficulty\":\"Facil\",\"servings\":2}}"
-    )
-
-
-def _build_image_lookup_prompt(recipe: dict[str, Any]) -> str:
-    lookup_context = {
-        "title": recipe.get("title") or "",
-        "description": recipe.get("description") or "",
-        "ingredients": recipe.get("ingredients") or [],
-        "tags": recipe.get("tags") or [],
-    }
-    return (
-        "Actua como un asistente que busca una imagen real para una receta ya existente. "
-        "Devuelve solo un objeto JSON valido, sin markdown, sin texto extra.\n"
-        "Busca una pagina fuente real y relevante del plato usando la busqueda web disponible.\n"
-        "Prioriza siempre image_source_url como la pagina donde aparece el plato.\n"
-        "Devuelve image_url solo si estas seguro de que es una URL directa y real de imagen, pero no es obligatorio.\n"
-        "Nunca inventes URLs ni dominios.\n"
-        "Si no puedes localizar una pagina fuente fiable, devuelve image_source_url null e image_lookup_status \"not_found\".\n"
-        f"Receta: {json.dumps(lookup_context, ensure_ascii=False)}\n"
-        "Formato exacto: "
-        "{\"image_source_url\":\"https://example.com/receta\",\"image_url\":null,"
-        "\"image_alt_text\":\"...\",\"image_lookup_status\":\"found\",\"image_lookup_reason\":\"...\"}"
     )
 
 
@@ -559,6 +1165,8 @@ def _prompt_context(
         "ingredientes_principales_permitidos": allowed_ingredient_names,
         "ingredientes_disponibles": ingredients,
         "ingredientes_excluidos": generation_context.get("excluded_ingredient_names") or [],
+        "restricciones_dieta_duras": (generation_context.get("dietary_rules") or {}).get("labels") or [],
+        "ingredientes_prohibidos_por_dieta": (generation_context.get("dietary_rules") or {}).get("forbidden_terms") or [],
         "preferencias_usuario": generation_context.get("preferences_text") or "sin preferencias adicionales",
         "resumen_preferencias": generation_context.get("preferences_summary") or "",
         "recetas_recientes_a_evitar": generation_context.get("recent_recipe_titles") or [],
@@ -808,6 +1416,17 @@ def _validate_recipe_context(
             "invalid_ingredients": [],
         }
 
+    dietary_conflict = recipe_conflicts_with_dietary_rules(recipe, generation_context.get("dietary_rules"))
+    if dietary_conflict:
+        return {
+            "valid": False,
+            "validation_stage": "recipe_context",
+            "invalid_reason": dietary_conflict["invalid_reason"],
+            "title": str(recipe.get("title") or "") or None,
+            "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
+            "invalid_ingredients": dietary_conflict["invalid_ingredients"],
+        }
+
     has_available_ingredient = False
     fridge_ingredient_count = 0
     pantry_ingredient_count = 0
@@ -945,6 +1564,13 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned)
 
 
+def _normalize_free_text(value: str) -> str:
+    decomposed = unicode_normalize("NFKD", str(value or "").strip().lower())
+    cleaned = "".join(character for character in decomposed if not combining(character))
+    cleaned = re.sub(r"[^a-z0-9\s]+", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _matches_name(left: str, right: str) -> bool:
     if len(left) < 3 or len(right) < 3:
         return False
@@ -989,18 +1615,69 @@ def _normalize_item(
     meal_type: str,
     ingredients: list[dict[str, str | None]],
 ) -> RecipePayload:
-    fallback_names = [
+    normalized_recipe = _normalize_recipe(item.get("recipe") or {}, [
         str(ingredient.get("name"))
         for ingredient in ingredients
         if ingredient.get("name")
-    ] or ["verduras"]
+    ] or ["verduras"])
     return {
         "day_index": day_index,
         "day_name": str(item.get("day_name") or DAYS[day_index]),
         "meal_type": meal_type,
-        "explanation": str(item.get("explanation") or "Elegido por encajar con ingredientes y preferencias."),
-        "recipe": _normalize_recipe(item.get("recipe") or {}, fallback_names),
+        "explanation": _normalize_explanation(
+            item.get("explanation"),
+            normalized_recipe,
+        ),
+        "recipe": normalized_recipe,
     }
+
+
+def _normalize_explanation(value: Any, recipe: dict[str, Any]) -> str:
+    raw_text = _clean_text(value, 280)
+    if not raw_text:
+        return _fallback_user_explanation(recipe)
+
+    cleaned_text = re.sub(r"\s+", " ", str(raw_text)).strip(" \"'")
+    if not cleaned_text:
+        return _fallback_user_explanation(recipe)
+
+    candidate_sentences = [
+        sentence.strip(" \"'")
+        for sentence in re.split(r"(?<=[.!?])\s+", cleaned_text)
+        if sentence.strip(" \"'")
+    ]
+    candidate = " ".join(candidate_sentences[:2]).strip()
+    if not candidate:
+        return _fallback_user_explanation(recipe)
+    if len(candidate) > 180 or _looks_like_internal_explanation(candidate):
+        return _fallback_user_explanation(recipe)
+    if candidate[-1] not in ".!?":
+        candidate += "."
+    return candidate
+
+
+def _looks_like_internal_explanation(value: str) -> bool:
+    normalized_value = _normalize_free_text(value)
+    if not normalized_value:
+        return True
+    return any(marker in normalized_value for marker in INTERNAL_EXPLANATION_MARKERS)
+
+
+def _fallback_user_explanation(recipe: dict[str, Any]) -> str:
+    ingredient_names = [
+        _ingredient_name_from_value(value).split(" - ", 1)[0].strip().lower()
+        for value in (recipe.get("ingredients") or [])
+        if _ingredient_name_from_value(value).split(" - ", 1)[0].strip()
+    ]
+    unique_ingredients = _unique_texts(ingredient_names)
+    if len(unique_ingredients) >= 2:
+        return (
+            f"Aprovecha {unique_ingredients[0]} y {unique_ingredients[1]} que ya tienes, "
+            "y mantiene variedad durante la semana."
+        )
+    if len(unique_ingredients) == 1:
+        return f"Aprovecha {unique_ingredients[0]} que ya tienes y encaja bien en el menu semanal."
+    return "Encaja con los ingredientes disponibles y ayuda a mantener variedad durante la semana."
 
 
 def _normalize_recipe(recipe: dict[str, Any], fallback_ingredients: list[str]) -> dict[str, Any]:
@@ -1406,61 +2083,6 @@ def _normalize_text_list(value: Any, fallback: list[str], limit: int) -> list[st
     return cleaned[:limit] or fallback[:limit]
 
 
-def _normalize_image_lookup(recipe: dict[str, Any], recipe_title: str) -> dict[str, Any]:
-    raw_image_url = _clean_http_url(recipe.get("image_url"))
-    raw_source_url = _clean_http_url(recipe.get("image_source_url"))
-    alt_text = _clean_text(recipe.get("image_alt_text"), 240)
-    status = _normalize_image_status(recipe.get("image_lookup_status"))
-    reason = _clean_text(recipe.get("image_lookup_reason"), 240)
-    source_result = _extract_image_from_source_page(raw_source_url) if raw_source_url else None
-    direct_image_url = _resolve_image_url(raw_image_url) if raw_image_url else None
-
-    if source_result and source_result["image_url"]:
-        return {
-            "image_url": source_result["image_url"],
-            "image_source_url": source_result["image_source_url"],
-            "image_alt_text": alt_text or f"Imagen de {recipe_title}.",
-            "image_lookup_status": "found",
-            "image_lookup_reason": source_result["image_lookup_reason"] or reason,
-        }
-
-    if direct_image_url:
-        final_source_url = source_result["image_source_url"] if source_result else (raw_source_url or None)
-        return {
-            "image_url": direct_image_url,
-            "image_source_url": final_source_url,
-            "image_alt_text": alt_text or f"Imagen de {recipe_title}.",
-            "image_lookup_status": "found",
-            "image_lookup_reason": reason or "Gemini encontro una imagen directa valida para esta receta.",
-        }
-
-    if raw_image_url and not direct_image_url:
-        record_log(
-            "warning",
-            "ai",
-            "La URL de imagen directa devuelta por Gemini no se pudo validar",
-            {"recipe_title": recipe_title},
-        )
-
-    if source_result:
-        final_reason = source_result["image_lookup_reason"] or reason
-        return {
-            "image_url": None,
-            "image_source_url": source_result["image_source_url"],
-            "image_alt_text": alt_text,
-            "image_lookup_status": source_result["image_lookup_status"],
-            "image_lookup_reason": final_reason,
-        }
-
-    return {
-        "image_url": None,
-        "image_source_url": raw_source_url,
-        "image_alt_text": alt_text,
-        "image_lookup_status": status if status != "found" else "not_found",
-        "image_lookup_reason": reason or "La IA no encontro una pagina fuente fiable para esta receta.",
-    }
-
-
 def _empty_image_lookup() -> dict[str, Any]:
     return {
         "image_url": None,
@@ -1470,73 +2092,6 @@ def _empty_image_lookup() -> dict[str, Any]:
         "image_lookup_reason": None,
         "cooldown_seconds": None,
     }
-
-
-def _normalize_image_status(value: Any) -> str:
-    status = str(value or "").strip().lower()
-    return status if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"} else "not_found"
-
-
-def _image_lookup_error_payload(recipe_title: str, call_meta: dict[str, Any]) -> dict[str, Any]:
-    status = str(call_meta.get("status") or "").strip().lower()
-    if status == "rate_limited":
-        cooldown_seconds = call_meta.get("cooldown_seconds")
-        return {
-            **_empty_image_lookup(),
-            "image_lookup_status": "rate_limited",
-            "image_lookup_reason": (
-                f"Gemini esta temporalmente saturado al buscar la imagen de {recipe_title}. "
-                f"Espera {cooldown_seconds} segundos y vuelve a intentarlo."
-                if cooldown_seconds
-                else "Gemini esta temporalmente saturado al buscar la imagen de esta receta."
-            ),
-            "cooldown_seconds": cooldown_seconds,
-        }
-    return {
-        **_empty_image_lookup(),
-        "image_lookup_status": "upstream_error",
-        "image_lookup_reason": "No se pudo consultar a Gemini para buscar una imagen de esta receta en este momento.",
-    }
-
-
-def _extract_image_from_source_page(source_url: str) -> dict[str, Any]:
-    page = _fetch_source_page(source_url)
-    if page is None:
-        return {
-            "image_url": None,
-            "image_source_url": source_url,
-            "image_lookup_status": "upstream_error",
-            "image_lookup_reason": "No se pudo consultar la pagina fuente propuesta por la IA.",
-        }
-
-    final_source_url = page["source_url"]
-    candidates = _extract_image_candidates_from_html(page["html"], final_source_url)
-    if not candidates:
-        return {
-            "image_url": None,
-            "image_source_url": final_source_url,
-            "image_lookup_status": "not_found",
-            "image_lookup_reason": "La pagina fuente no expone una imagen reutilizable en sus metadatos principales.",
-        }
-
-    for candidate in candidates:
-        resolved_image_url = _resolve_image_url(candidate)
-        if resolved_image_url:
-            return {
-                "image_url": resolved_image_url,
-                "image_source_url": final_source_url,
-                "image_lookup_status": "found",
-                "image_lookup_reason": "Se encontro una imagen valida a partir de los metadatos de la pagina fuente.",
-            }
-
-    return {
-        "image_url": None,
-        "image_source_url": final_source_url,
-        "image_lookup_status": "invalid",
-        "image_lookup_reason": "La pagina fuente incluia referencias de imagen, pero ninguna se pudo validar como imagen real.",
-    }
-
-
 @lru_cache(maxsize=128)
 def _fetch_source_page(source_url: str) -> dict[str, str] | None:
     headers = {

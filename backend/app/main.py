@@ -65,6 +65,8 @@ PANTRY_STRUCTURAL_BASICS = [
 PANTRY_BASICS = [*PANTRY_SUPPORT_BASICS, *PANTRY_STRUCTURAL_BASICS]
 MAX_PANTRY_INGREDIENTS_PER_RECIPE = 3
 MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE = 1
+MAX_RECIPE_IMAGE_ATTEMPTS = 3
+MAX_RECIPE_IMAGE_CANDIDATES = 6
 
 
 @asynccontextmanager
@@ -140,10 +142,12 @@ def ai_status() -> AiStatusOut:
         configured=configured,
         mode="ai" if configured else "fallback",
         message=(
-            "Gemini configurado. El menu semanal se genera con IA real, prioriza la nevera y admite una despensa basica limitada."
+            "Gemini configurado. Se reserva para la generacion del menu semanal; las imagenes de recetas se resuelven por busqueda HTTP bajo demanda."
             if configured
             else "Gemini no esta configurado. La generacion usara fallback local de demo."
         ),
+        image_provider="http-search",
+        images_enabled=True,
     )
 
 
@@ -264,7 +268,7 @@ def list_recipes(
     q: str = Query(default=""),
     tag: str = Query(default=""),
     session: Session = Depends(get_session),
-) -> list[Recipe]:
+) -> list[dict[str, Any]]:
     recipes = list(
         session.scalars(select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc()))
     )
@@ -280,11 +284,11 @@ def list_recipes(
         ]
     if tag_query:
         recipes = [recipe for recipe in recipes if any(tag_query == tag_value.lower() for tag_value in recipe.tags)]
-    return recipes
+    return [_recipe_to_dict(recipe) for recipe in recipes]
 
 
 @app.post("/recipes", response_model=RecipeOut, status_code=status.HTTP_201_CREATED)
-def create_recipe(payload: RecipeCreate, session: Session = Depends(get_session)) -> Recipe:
+def create_recipe(payload: RecipeCreate, session: Session = Depends(get_session)) -> dict[str, Any]:
     ensure_demo_user(session)
     data = _recipe_create_payload(payload)
     if not data["ingredients"] or not data["steps"]:
@@ -299,18 +303,18 @@ def create_recipe(payload: RecipeCreate, session: Session = Depends(get_session)
         "Receta creada manualmente",
         {"recipe_id": recipe.id, "title": recipe.title, "is_favorite": recipe.is_favorite},
     )
-    return recipe
+    return _recipe_to_dict(recipe)
 
 
 @app.patch("/recipes/{recipe_id}", response_model=RecipeOut)
-def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depends(get_session)) -> Recipe:
+def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depends(get_session)) -> dict[str, Any]:
     recipe = session.get(Recipe, recipe_id)
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
 
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
-        return recipe
+        return _recipe_to_dict(recipe)
 
     for field, value in changes.items():
         if isinstance(value, list):
@@ -323,6 +327,12 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
                 value = _normalize_image_lookup_status(value, changes.get("image_url", recipe.image_url))
         setattr(recipe, field, value)
 
+    if any(field in changes for field in {"image_url", "image_source_url", "image_alt_text", "image_lookup_status"}):
+        recipe.image_candidates = []
+        recipe.image_candidate_index = None
+        recipe.image_lookup_attempt_count = 0
+        recipe.image_lookup_retry_after = None
+
     session.commit()
     session.refresh(recipe)
     record_log(
@@ -331,25 +341,22 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
         "Receta actualizada",
         {"recipe_id": recipe.id, "updated_fields": sorted(changes.keys())},
     )
-    return recipe
+    return _recipe_to_dict(recipe)
 
 
 @app.post("/recipes/{recipe_id}/resolve-image", response_model=RecipeOut)
-def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), session: Session = Depends(get_session)) -> Recipe:
+def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), session: Session = Depends(get_session)) -> dict[str, Any]:
     recipe = session.get(Recipe, recipe_id)
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
 
-    if not settings.has_valid_gemini_api_key:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
-
     if _image_resolution_cooldown_active(recipe):
-        return recipe
+        return _recipe_to_dict(recipe)
 
     if not force and _should_skip_image_resolution(recipe):
-        return recipe
+        return _recipe_to_dict(recipe)
 
-    image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+    image_payload = ai.resolve_recipe_image(_recipe_image_resolution_context(recipe))
     _apply_image_lookup_payload(recipe, image_payload)
 
     session.commit()
@@ -364,14 +371,11 @@ def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), ses
             "has_image_url": bool(recipe.image_url),
         },
     )
-    return recipe
+    return _recipe_to_dict(recipe)
 
 
 @app.post("/recipes/resolve-images", response_model=ResolveRecipeImagesOut)
 def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session = Depends(get_session)) -> ResolveRecipeImagesOut:
-    if not settings.has_valid_gemini_api_key:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
-
     query = select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc())
     recipes = list(session.scalars(query))
     requested_ids = {recipe_id.strip() for recipe_id in payload.recipe_ids if recipe_id.strip()}
@@ -400,12 +404,12 @@ def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session 
             skipped_count += 1
             continue
 
-        image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+        image_payload = ai.resolve_recipe_image(_recipe_image_resolution_context(recipe))
         _apply_image_lookup_payload(recipe, image_payload)
         updated_recipes.append(recipe)
         attempted_count += 1
 
-        if recipe.image_lookup_status in {"rate_limited", "upstream_error"}:
+        if recipe.image_lookup_status == "upstream_error":
             stopped_reason = recipe.image_lookup_status
             break
 
@@ -430,7 +434,7 @@ def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session 
     )
 
     return ResolveRecipeImagesOut(
-        updated_recipes=updated_recipes,
+        updated_recipes=[_recipe_to_dict(recipe) for recipe in updated_recipes],
         attempted_count=attempted_count,
         updated_count=len(updated_recipes),
         skipped_count=skipped_count,
@@ -472,8 +476,9 @@ def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | Non
 def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
     ensure_demo_user(session)
     all_ingredients = _ingredient_payloads(session)
-    ingredients = _filter_usable_ingredients(all_ingredients, payload.excluded_ingredient_ids)
-    if len(ingredients) < MIN_INGREDIENTS_FOR_MENU:
+    excluded_ingredient_names = _excluded_ingredient_names(all_ingredients, payload.excluded_ingredient_ids)
+    usable_ingredients = _filter_usable_ingredients(all_ingredients, payload.excluded_ingredient_ids)
+    if len(usable_ingredients) < MIN_INGREDIENTS_FOR_MENU:
         record_log(
             "warning",
             "menu_planning",
@@ -481,7 +486,7 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             {
                 "user_id": DEMO_USER_ID,
                 "ingredient_count": len(all_ingredients),
-                "usable_ingredient_count": len(ingredients),
+                "usable_ingredient_count": len(usable_ingredients),
                 "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
                 "minimum_required": MIN_INGREDIENTS_FOR_MENU,
             },
@@ -490,19 +495,45 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=_insufficient_ingredient_detail(
                 ingredient_count=len(all_ingredients),
-                usable_ingredient_count=len(ingredients),
+                usable_ingredient_count=len(usable_ingredients),
                 has_exclusions=bool(payload.excluded_ingredient_ids),
             ),
         )
 
     previous_titles = _previous_menu_recipe_titles(session)
+    dietary_rules = ai.infer_dietary_rules(payload.preferences)
+    ingredients, diet_removed_ingredient_names = _filter_preference_compatible_ingredients(usable_ingredients, dietary_rules)
     compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
         payload.excluded_ingredient_ids,
         previous_titles,
         session,
+        dietary_rules=dietary_rules,
     )
+    viability_report = _menu_generation_viability_report(
+        preferences=payload.preferences,
+        compatible_ingredients=ingredients,
+        excluded_ingredient_names=excluded_ingredient_names,
+        diet_removed_ingredient_names=diet_removed_ingredient_names,
+        compatible_saved_recipes=compatible_saved_recipes,
+        dietary_rules=dietary_rules,
+    )
+    if not viability_report["viable"]:
+        record_log(
+            "warning",
+            "menu_planning",
+            "Generacion semanal bloqueada por base de ingredientes incompatible con preferencias",
+            {
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(usable_ingredients),
+                "compatible_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "compatible_recipe_count": len(compatible_saved_recipes),
+                **viability_report,
+            },
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=viability_report["message"])
     compatible_recipe_titles = [recipe["title"] for recipe in compatible_saved_recipes if not recipe["is_recent"]]
     favorite_recipe_titles = [
         recipe["title"] for recipe in compatible_saved_recipes if recipe["is_favorite"] and not recipe["is_recent"]
@@ -514,6 +545,7 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         payload.excluded_ingredient_ids,
         previous_titles,
         compatible_saved_recipes,
+        dietary_rules=dietary_rules,
     )
     try:
         generated = ai.generate_weekly_menu(ingredients, generation_context)
@@ -530,7 +562,8 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             ),
             {
                 "ingredient_count": len(all_ingredients),
-                "usable_ingredient_count": len(ingredients),
+                "usable_ingredient_count": len(usable_ingredients),
+                "compatible_ingredient_count": len(ingredients),
                 "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
                 "compatible_recipe_count": len(compatible_recipe_titles),
                 "favorite_recipe_count": len(favorite_recipe_titles),
@@ -565,7 +598,8 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             exc,
             {
                 "ingredient_count": len(all_ingredients),
-                "usable_ingredient_count": len(ingredients),
+                "usable_ingredient_count": len(usable_ingredients),
+                "compatible_ingredient_count": len(ingredients),
                 "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
                 "compatible_recipe_count": len(compatible_recipe_titles),
                 "favorite_recipe_count": len(favorite_recipe_titles),
@@ -580,6 +614,7 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         preferences={
             "text": payload.preferences,
             "summary": generation_context["preferences_summary"],
+            "dietary_rules": generation_context["dietary_rules"],
             "excluded_ingredient_ids": payload.excluded_ingredient_ids,
             "excluded_ingredient_names": generation_context["excluded_ingredient_names"],
             "compatible_recipe_titles": compatible_recipe_titles,
@@ -665,12 +700,14 @@ def replace_menu_item(
         )
 
     recent_titles = _replacement_recipe_titles(session, menu.id)
+    dietary_rules = ai.infer_dietary_rules(payload.preferences)
     compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
         payload.excluded_ingredient_ids,
         recent_titles,
         session,
+        dietary_rules=dietary_rules,
     )
     compatible_recipe_titles = [recipe["title"] for recipe in compatible_saved_recipes if not recipe["is_recent"]]
     favorite_recipe_titles = [
@@ -683,6 +720,7 @@ def replace_menu_item(
         payload.excluded_ingredient_ids,
         recent_titles,
         compatible_saved_recipes,
+        dietary_rules=dietary_rules,
     )
     try:
         generated = ai.generate_replacement(
@@ -781,10 +819,16 @@ def ensure_recipe_edit_columns() -> None:
         statements.append(("image_source_url", "ALTER TABLE recipes ADD COLUMN image_source_url TEXT"))
     if "image_alt_text" not in columns:
         statements.append(("image_alt_text", "ALTER TABLE recipes ADD COLUMN image_alt_text TEXT"))
+    if "image_candidates" not in columns:
+        statements.append(("image_candidates", "ALTER TABLE recipes ADD COLUMN image_candidates JSON"))
+    if "image_candidate_index" not in columns:
+        statements.append(("image_candidate_index", "ALTER TABLE recipes ADD COLUMN image_candidate_index INTEGER"))
     if "image_lookup_status" not in columns:
         statements.append(("image_lookup_status", "ALTER TABLE recipes ADD COLUMN image_lookup_status VARCHAR(40)"))
     if "image_lookup_reason" not in columns:
         statements.append(("image_lookup_reason", "ALTER TABLE recipes ADD COLUMN image_lookup_reason TEXT"))
+    if "image_lookup_attempt_count" not in columns:
+        statements.append(("image_lookup_attempt_count", "ALTER TABLE recipes ADD COLUMN image_lookup_attempt_count INTEGER NOT NULL DEFAULT 0"))
     if "image_lookup_attempted_at" not in columns:
         statements.append(("image_lookup_attempted_at", "ALTER TABLE recipes ADD COLUMN image_lookup_attempted_at TIMESTAMP"))
     if "image_lookup_retry_after" not in columns:
@@ -983,8 +1027,11 @@ def _create_recipe_from_payload(session: Session, payload: dict[str, Any], sourc
         image_url=image_fields["image_url"],
         image_source_url=image_fields["image_source_url"],
         image_alt_text=image_fields["image_alt_text"],
+        image_candidates=image_fields["image_candidates"],
+        image_candidate_index=image_fields["image_candidate_index"],
         image_lookup_status=image_fields["image_lookup_status"],
         image_lookup_reason=image_fields["image_lookup_reason"],
+        image_lookup_attempt_count=image_fields["image_lookup_attempt_count"],
         source=persisted_source,
         is_favorite=bool(payload.get("is_favorite", False)),
     )
@@ -1006,6 +1053,10 @@ def _recipe_create_payload(payload: RecipeCreate) -> dict[str, Any]:
 
 
 def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
+    candidates = _normalize_image_candidates(recipe.image_candidates)
+    image_lookup_status = _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url)
+    candidate_index = _normalize_image_candidate_index(recipe.image_candidate_index, len(candidates))
+    attempt_count = max(int(recipe.image_lookup_attempt_count or 0), 0)
     return {
         "id": recipe.id,
         "title": recipe.title,
@@ -1019,8 +1070,19 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "image_url": recipe.image_url,
         "image_source_url": recipe.image_source_url,
         "image_alt_text": recipe.image_alt_text,
-        "image_lookup_status": _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url),
+        "image_lookup_status": image_lookup_status,
         "image_lookup_reason": recipe.image_lookup_reason,
+        "image_lookup_attempt_count": attempt_count,
+        "image_candidate_count": len(candidates),
+        "image_candidate_position": candidate_index + 1 if candidate_index is not None else 0,
+        "image_can_retry": _image_can_retry(
+            image_lookup_status=image_lookup_status,
+            image_url=recipe.image_url,
+            candidates=candidates,
+            candidate_index=candidate_index,
+            attempt_count=attempt_count,
+            retry_after=recipe.image_lookup_retry_after,
+        ),
         "image_lookup_attempted_at": recipe.image_lookup_attempted_at,
         "image_lookup_retry_after": recipe.image_lookup_retry_after,
         "source": recipe.source,
@@ -1029,19 +1091,35 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
     }
 
 
+def _recipe_image_resolution_context(recipe: Recipe) -> dict[str, Any]:
+    data = _recipe_to_dict(recipe)
+    data["image_candidates"] = _normalize_image_candidates(recipe.image_candidates)
+    data["image_candidate_index"] = _normalize_image_candidate_index(
+        recipe.image_candidate_index,
+        len(data["image_candidates"]),
+    )
+    return data
+
+
 def _normalize_recipe_image_fields(value: Any) -> dict[str, Any]:
     payload = value if isinstance(value, dict) else {}
     image_url = _clean_optional_string(payload.get("image_url"), 500)
     image_source_url = _clean_optional_string(payload.get("image_source_url"), 500)
     image_alt_text = _clean_optional_string(payload.get("image_alt_text"), 240)
     image_lookup_reason = _clean_optional_string(payload.get("image_lookup_reason"), 240)
+    image_candidates = _normalize_image_candidates(payload.get("image_candidates"))
+    image_candidate_index = _normalize_image_candidate_index(payload.get("image_candidate_index"), len(image_candidates))
+    image_lookup_attempt_count = max(int(payload.get("image_lookup_attempt_count") or 0), 0)
     image_lookup_status = _normalize_image_lookup_status(payload.get("image_lookup_status"), image_url)
     return {
         "image_url": image_url,
         "image_source_url": image_source_url,
         "image_alt_text": image_alt_text,
+        "image_candidates": image_candidates,
+        "image_candidate_index": image_candidate_index,
         "image_lookup_status": image_lookup_status,
         "image_lookup_reason": image_lookup_reason,
+        "image_lookup_attempt_count": image_lookup_attempt_count,
         "image_lookup_attempted_at": None,
         "image_lookup_retry_after": None,
     }
@@ -1054,13 +1132,53 @@ def _clean_optional_string(value: Any, limit: int) -> str | None:
     return cleaned[:limit] if cleaned else None
 
 
+def _normalize_image_candidates(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        image_url = _clean_optional_string(item.get("image_url"), 500)
+        image_source_url = _clean_optional_string(item.get("image_source_url"), 500)
+        image_alt_text = _clean_optional_string(item.get("image_alt_text"), 240)
+        if not image_url or not image_source_url or image_url in seen_urls:
+            continue
+        seen_urls.add(image_url)
+        candidates.append(
+            {
+                "image_url": image_url,
+                "image_source_url": image_source_url,
+                "image_alt_text": image_alt_text or "",
+            }
+        )
+        if len(candidates) >= MAX_RECIPE_IMAGE_CANDIDATES:
+            break
+    return candidates
+
+
+def _normalize_image_candidate_index(value: Any, candidate_count: int) -> int | None:
+    if candidate_count <= 0:
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    if index < 0 or index >= candidate_count:
+        return None
+    return index
+
+
 def _normalize_image_lookup_status(value: Any, image_url: Any = None) -> str | None:
     status = str(value or "").strip().lower()
-    if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"}:
+    if status == "rate_limited":
+        status = "pending"
+    if status in {"pending", "found", "not_found", "invalid", "attempts_exhausted", "upstream_error"}:
         return status
     if isinstance(image_url, str) and image_url.strip():
         return "found"
-    return None
+    return "pending"
 
 
 def _utcnow() -> datetime:
@@ -1078,26 +1196,26 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
 def _apply_image_lookup_payload(recipe: Recipe, image_payload: dict[str, Any] | None) -> None:
     now = _utcnow()
     payload = image_payload if isinstance(image_payload, dict) else {}
+    candidates = _normalize_image_candidates(payload.get("image_candidates"))
     recipe.image_url = _clean_optional_string(payload.get("image_url"), 500)
     recipe.image_source_url = _clean_optional_string(payload.get("image_source_url"), 500)
     recipe.image_alt_text = _clean_optional_string(payload.get("image_alt_text"), 240)
+    recipe.image_candidates = candidates
+    recipe.image_candidate_index = _normalize_image_candidate_index(payload.get("image_candidate_index"), len(candidates))
     recipe.image_lookup_status = _normalize_image_lookup_status(payload.get("image_lookup_status"), recipe.image_url)
     recipe.image_lookup_reason = _clean_optional_string(payload.get("image_lookup_reason"), 240)
+    try:
+        recipe.image_lookup_attempt_count = max(int(payload.get("image_lookup_attempt_count") or 0), 0)
+    except (TypeError, ValueError):
+        recipe.image_lookup_attempt_count = 0
     recipe.image_lookup_attempted_at = now
     recipe.image_lookup_retry_after = _image_retry_after_from_payload(payload, now)
 
 
 def _image_retry_after_from_payload(payload: dict[str, Any], now: datetime) -> datetime | None:
     status = _normalize_image_lookup_status(payload.get("image_lookup_status"))
-    cooldown_seconds = payload.get("cooldown_seconds")
-    if status == "rate_limited":
-        try:
-            seconds = max(int(cooldown_seconds), 1)
-        except (TypeError, ValueError):
-            seconds = 30
-        return now + timedelta(seconds=seconds)
     if status == "upstream_error":
-        return now + timedelta(minutes=10)
+        return now + timedelta(minutes=5)
     return None
 
 
@@ -1105,9 +1223,9 @@ def _needs_image_resolution(recipe: Recipe) -> bool:
     if recipe.image_url:
         return False
     status = _normalize_image_lookup_status(recipe.image_lookup_status)
-    if status in {"invalid", "not_found"}:
+    if status in {"invalid", "not_found", "attempts_exhausted"}:
         return False
-    if status in {"rate_limited", "upstream_error"}:
+    if status == "upstream_error":
         retry_after = _coerce_utc_datetime(recipe.image_lookup_retry_after)
         return retry_after is None or retry_after <= _utcnow()
     return True
@@ -1115,7 +1233,7 @@ def _needs_image_resolution(recipe: Recipe) -> bool:
 
 def _image_resolution_cooldown_active(recipe: Recipe) -> bool:
     status = _normalize_image_lookup_status(recipe.image_lookup_status)
-    if status not in {"rate_limited", "upstream_error"}:
+    if status != "upstream_error":
         return False
     retry_after = _coerce_utc_datetime(recipe.image_lookup_retry_after)
     return retry_after is not None and retry_after > _utcnow()
@@ -1131,16 +1249,35 @@ def _image_batch_message(
     remaining_pending_count: int,
     stopped_reason: str | None,
 ) -> str:
-    if stopped_reason == "rate_limited":
-        return "Gemini esta saturado. La resolucion de imagenes se pausara temporalmente."
     if stopped_reason == "upstream_error":
-        return "La resolucion de imagenes se ha detenido por un error temporal del proveedor."
+        return "La resolucion de imagenes se ha detenido temporalmente por un error al buscar o validar paginas externas."
     if attempted_count == 0:
         return "No habia recetas nuevas pendientes de resolver imagen."
     found_count = sum(1 for recipe in updated_recipes if recipe.image_lookup_status == "found" and recipe.image_url)
     if remaining_pending_count > 0:
         return f"Se actualizaron {found_count} imagenes y quedan {remaining_pending_count} recetas pendientes."
     return f"Resolucion de imagenes completada. {found_count} recetas tienen foto validada."
+
+
+def _image_can_retry(
+    *,
+    image_lookup_status: str | None,
+    image_url: str | None,
+    candidates: list[dict[str, str]],
+    candidate_index: int | None,
+    attempt_count: int,
+    retry_after: datetime | None,
+) -> bool:
+    normalized_status = _normalize_image_lookup_status(image_lookup_status, image_url)
+    if normalized_status == "attempts_exhausted":
+        return False
+    if normalized_status == "upstream_error":
+        retry_at = _coerce_utc_datetime(retry_after)
+        return retry_at is None or retry_at <= _utcnow()
+    if candidates:
+        current_index = candidate_index if candidate_index is not None else -1
+        return current_index + 1 < len(candidates)
+    return normalized_status == "pending"
 
 
 def _difficulty_from_minutes(minutes: int) -> str:
@@ -1175,12 +1312,171 @@ def _filter_usable_ingredients(
     return [ingredient for ingredient in ingredients if ingredient.get("id") not in excluded_ids]
 
 
+def _excluded_ingredient_names(
+    ingredients: list[dict[str, str | None]],
+    excluded_ingredient_ids: list[str],
+) -> list[str]:
+    excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
+    if not excluded_ids:
+        return []
+    names = [
+        str(ingredient.get("name")).strip()
+        for ingredient in ingredients
+        if ingredient.get("id") in excluded_ids and ingredient.get("name")
+    ]
+    return _ordered_unique_names(names)
+
+
+def _filter_preference_compatible_ingredients(
+    ingredients: list[dict[str, str | None]],
+    dietary_rules: dict[str, Any] | None,
+) -> tuple[list[dict[str, str | None]], list[str]]:
+    if not dietary_rules or not dietary_rules.get("strict"):
+        return ingredients, []
+
+    compatible: list[dict[str, str | None]] = []
+    removed_names: list[str] = []
+    for ingredient in ingredients:
+        ingredient_name = str(ingredient.get("name") or "").strip()
+        if not ingredient_name:
+            continue
+        conflict = ai.recipe_conflicts_with_dietary_rules(
+            {"title": ingredient_name, "ingredients": [ingredient_name]},
+            dietary_rules,
+        )
+        if conflict:
+            removed_names.extend(conflict.get("invalid_ingredients") or [ingredient_name])
+            continue
+        compatible.append(ingredient)
+    return compatible, _ordered_unique_names(removed_names)
+
+
+def _menu_generation_viability_report(
+    *,
+    preferences: str,
+    compatible_ingredients: list[dict[str, str | None]],
+    excluded_ingredient_names: list[str],
+    diet_removed_ingredient_names: list[str],
+    compatible_saved_recipes: list[dict[str, Any]],
+    dietary_rules: dict[str, Any] | None,
+) -> dict[str, Any]:
+    preference_profile = _menu_preference_profile(preferences)
+    compatible_names = [
+        str(ingredient.get("name")).strip()
+        for ingredient in compatible_ingredients
+        if ingredient.get("name")
+    ]
+    category_names = {
+        normalize_label(str(ingredient.get("category") or "otros"))
+        for ingredient in compatible_ingredients
+        if ingredient.get("name")
+    }
+    compatible_recipe_count = len([recipe for recipe in compatible_saved_recipes if not recipe.get("is_recent")])
+
+    required_ingredient_count = MIN_INGREDIENTS_FOR_MENU
+    required_category_count = 2
+    limiting_factors: list[str] = []
+
+    if dietary_rules and dietary_rules.get("strict"):
+        required_ingredient_count += 1
+        labels = ", ".join(str(label) for label in dietary_rules.get("labels") or [])
+        limiting_factors.append(f"dieta/restriccion {labels or 'estricta'}")
+    if preference_profile["low_carb"]:
+        required_ingredient_count += 1
+        limiting_factors.append("dieta baja en carbohidratos")
+    if preference_profile["variety_level"] == "alta":
+        required_ingredient_count += 1
+        required_category_count += 1
+        limiting_factors.append("variedad semanal alta")
+    if (dietary_rules and dietary_rules.get("strict")) and preference_profile["low_carb"]:
+        required_category_count = max(required_category_count, 3)
+    if compatible_recipe_count >= 3 and required_ingredient_count > MIN_INGREDIENTS_FOR_MENU:
+        required_ingredient_count -= 1
+
+    compatible_ingredient_count = len(compatible_names)
+    category_count = len(category_names)
+    viable = (
+        compatible_ingredient_count >= required_ingredient_count
+        and category_count >= required_category_count
+    )
+
+    diet_removed = _ordered_unique_names(diet_removed_ingredient_names)
+    excluded_names = _ordered_unique_names(excluded_ingredient_names)
+    message = ""
+    if not viable:
+        constraints: list[str] = []
+        if diet_removed:
+            constraints.append("se descartan por dieta/restriccion " + ", ".join(diet_removed[:5]))
+        if excluded_names:
+            constraints.append("has excluido " + ", ".join(excluded_names[:5]))
+        if limiting_factors:
+            constraints.append("mantienes " + ", ".join(limiting_factors))
+        message = (
+            "No hay suficientes ingredientes compatibles con tus preferencias actuales para generar un menu semanal valido. "
+            f"Tras aplicar tus filtros solo quedan {compatible_ingredient_count} ingredientes compatibles repartidos en "
+            f"{category_count} categorias. Para este caso necesitamos al menos {required_ingredient_count} ingredientes "
+            f"compatibles y {required_category_count} categorias distintas."
+        )
+        if constraints:
+            message += " Ahora mismo " + "; ".join(constraints) + "."
+        if compatible_recipe_count <= 1:
+            message += " Tampoco hay suficientes recetas guardadas compatibles para ampliar opciones."
+        message += " Anade mas ingredientes compatibles o relaja alguna preferencia o restriccion."
+
+    return {
+        "viable": viable,
+        "message": message,
+        "compatible_ingredient_count": compatible_ingredient_count,
+        "compatible_ingredient_names": compatible_names,
+        "compatible_category_count": category_count,
+        "compatible_recipe_count": compatible_recipe_count,
+        "required_min_ingredients": required_ingredient_count,
+        "required_min_categories": required_category_count,
+        "limiting_factors": limiting_factors,
+        "excluded_ingredient_names": excluded_names,
+        "diet_removed_ingredient_names": diet_removed,
+    }
+
+
+def _menu_preference_profile(preferences: str) -> dict[str, Any]:
+    normalized_preferences = normalize_label(preferences)
+    variety_level = "media"
+    if "nivel de variedad semanal: alta" in normalized_preferences:
+        variety_level = "alta"
+    elif "nivel de variedad semanal: baja" in normalized_preferences:
+        variety_level = "baja"
+
+    return {
+        "low_carb": any(
+            label in normalized_preferences
+            for label in {"baja en carbohidratos", "bajo en carbohidratos", "low carb", "low-carb"}
+        ),
+        "variety_level": variety_level,
+    }
+
+
+def _ordered_unique_names(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            continue
+        key = normalize_label(cleaned)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(cleaned)
+    return ordered
+
+
 def _compatible_saved_recipe_context(
     all_ingredients: list[dict[str, str | None]],
     usable_ingredients: list[dict[str, str | None]],
     excluded_ingredient_ids: list[str],
     recent_recipe_titles: list[str],
     session: Session,
+    dietary_rules: dict[str, Any] | None = None,
     limit: int = 8,
 ) -> list[dict[str, Any]]:
     usable_names = {
@@ -1206,6 +1502,16 @@ def _compatible_saved_recipe_context(
     ).all()
     compatible_recipes: list[dict[str, Any]] = []
     for recipe in recipes:
+        if ai.recipe_conflicts_with_dietary_rules(
+            {
+                "title": recipe.title,
+                "ingredients": recipe.ingredients or [],
+                "description": recipe.description,
+                "tags": recipe.tags or [],
+            },
+            dietary_rules,
+        ):
+            continue
         recipe_ingredient_names = [
             _normalize_recipe_ingredient_name(str(value))
             for value in (recipe.ingredients or [])
@@ -1355,6 +1661,7 @@ def _build_generation_context(
     excluded_ingredient_ids: list[str],
     recent_recipe_titles: list[str],
     compatible_saved_recipes: list[dict[str, Any]],
+    dietary_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
     excluded_ingredient_names = [
@@ -1379,6 +1686,7 @@ def _build_generation_context(
         "compatible_saved_recipes": compatible_saved_recipes,
         "compatible_recipe_titles": compatible_recipe_titles,
         "favorite_recipe_titles": favorite_recipe_titles,
+        "dietary_rules": dietary_rules or {},
         "pantry_basics": PANTRY_BASICS,
         "pantry_support_basics": PANTRY_SUPPORT_BASICS,
         "pantry_free_support_basics": PANTRY_FREE_SUPPORT_BASICS,

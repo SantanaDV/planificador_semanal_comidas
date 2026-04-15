@@ -127,8 +127,8 @@ def build_replacement_item(
             "image_url": None,
             "image_source_url": None,
             "image_alt_text": f"Imagen no disponible para la receta {title}.",
-            "image_lookup_status": "not_found",
-            "image_lookup_reason": "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.",
+            "image_lookup_status": "pending",
+            "image_lookup_reason": "La receta todavia no ha intentado resolver una imagen real por HTTP.",
             "source": "fallback-local",
         },
     }
@@ -154,8 +154,8 @@ def _pick_saved_recipe(
 
 def _saved_recipe_image_lookup_status(recipe: dict[str, Any]) -> str:
     status = str(recipe.get("image_lookup_status") or "").strip().lower()
-    if status in {"found", "not_found", "invalid", "rate_limited", "upstream_error"}:
+    if status in {"pending", "found", "not_found", "invalid", "attempts_exhausted", "upstream_error"}:
         return status
     if str(recipe.get("image_url") or "").strip():
         return "found"
-    return "not_found"
+    return "pending"
