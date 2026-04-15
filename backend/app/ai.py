@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from typing import Any
+from unicodedata import combining, normalize as unicode_normalize
+from urllib.parse import urlparse
 
 import httpx
 
@@ -13,6 +16,19 @@ from .logging_service import record_exception, record_log
 RecipePayload = dict[str, Any]
 MenuPayload = dict[str, Any]
 GenerationContext = dict[str, Any]
+ValidationReport = dict[str, Any]
+
+HTTP_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 MenuPlan/1.0"
+)
+EXPECTED_WEEKLY_ITEMS = len(DAYS) * len(MEAL_TYPES)
+
+
+class WeeklyMenuResolutionError(Exception):
+    def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.context = context or {}
 
 
 def generate_weekly_menu(
@@ -63,7 +79,20 @@ def generate_replacement(
     return fallback
 
 
-def _call_gemini(prompt: str) -> dict[str, Any] | None:
+def resolve_recipe_image(recipe: dict[str, Any]) -> dict[str, Any] | None:
+    prompt = _build_image_lookup_prompt(recipe)
+    payload = _call_gemini(prompt, use_google_search=settings.gemini_enable_google_search, timeout_seconds=35)
+    if not isinstance(payload, dict):
+        return None
+    return _normalize_image_lookup(payload, str(recipe.get("title") or "receta"))
+
+
+def _call_gemini_with_meta(
+    prompt: str,
+    *,
+    use_google_search: bool,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if not settings.has_valid_gemini_api_key:
         record_log(
             "warning",
@@ -71,29 +100,57 @@ def _call_gemini(prompt: str) -> dict[str, Any] | None:
             "Gemini API key ausente o no valida; se usa fallback local",
             {"model": settings.gemini_model},
         )
-        return None
+        return None, {"status": "missing_api_key", "model": settings.gemini_model}
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
-    payload = {
+    generation_config: dict[str, Any] = {"temperature": 0.3}
+    payload: dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
+        "generationConfig": generation_config,
     }
+    if use_google_search:
+        payload["tools"] = [{"google_search": {}}]
+    else:
+        generation_config["responseMimeType"] = "application/json"
+
     headers = {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key or ""}
 
     try:
-        with httpx.Client(timeout=25) as client:
+        with httpx.Client(timeout=timeout_seconds) as client:
             response = client.post(url, json=payload, headers=headers)
             response.raise_for_status()
         text = _extract_text(response.json())
-        return _parse_json(text)
+        return _parse_json(text), {"status": "ok", "model": settings.gemini_model}
     except (httpx.HTTPError, KeyError, TypeError, json.JSONDecodeError) as exc:
         record_exception(
             "ai",
             "Fallo llamando a Gemini; se usa fallback local",
             exc,
-            {"model": settings.gemini_model},
+            {
+                "model": settings.gemini_model,
+                "google_search_enabled": use_google_search,
+                "timeout_seconds": timeout_seconds,
+            },
         )
-        return None
+        return None, {
+            "status": "call_error",
+            "model": settings.gemini_model,
+            "exception_type": exc.__class__.__name__,
+        }
+
+
+def _call_gemini(
+    prompt: str,
+    *,
+    use_google_search: bool = False,
+    timeout_seconds: int = 25,
+) -> dict[str, Any] | None:
+    payload, _meta = _call_gemini_with_meta(
+        prompt,
+        use_google_search=use_google_search,
+        timeout_seconds=timeout_seconds,
+    )
+    return payload
 
 
 def _extract_text(response: dict[str, Any]) -> str:
@@ -102,8 +159,26 @@ def _extract_text(response: dict[str, Any]) -> str:
 
 
 def _parse_json(text: str) -> dict[str, Any]:
-    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    return json.loads(cleaned)
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.DOTALL).strip()
+
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(cleaned)
+        return parsed
+    except json.JSONDecodeError:
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = cleaned.find(opener)
+            end = cleaned.rfind(closer)
+            if start == -1 or end == -1 or end <= start:
+                continue
+            candidate = cleaned[start : end + 1]
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(candidate)
+                return parsed
+            except json.JSONDecodeError:
+                continue
+        raise
 
 
 def _build_weekly_prompt(
@@ -143,9 +218,31 @@ def _build_replacement_prompt(
         "Usa ingredientes disponibles, respeta exclusiones, prioriza favoritas compatibles y evita recetas recientes.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
-        "Formato exacto: {\"explanation\":\"...\",\"recipe\":{\"title\":\"...\",\"description\":\"...\","
-        "\"ingredients\":[\"...\"],\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25,"
-        "\"difficulty\":\"Facil\",\"servings\":2}}"
+        "Formato exacto: "
+        "{\"explanation\":\"...\",\"recipe\":{\"title\":\"...\",\"description\":\"...\",\"ingredients\":[\"...\"],"
+        "\"steps\":[\"...\"],\"tags\":[\"...\"],\"prep_time_minutes\":25,\"difficulty\":\"Facil\",\"servings\":2}}"
+    )
+
+
+def _build_image_lookup_prompt(recipe: dict[str, Any]) -> str:
+    lookup_context = {
+        "title": recipe.get("title") or "",
+        "description": recipe.get("description") or "",
+        "ingredients": recipe.get("ingredients") or [],
+        "tags": recipe.get("tags") or [],
+    }
+    return (
+        "Actua como un asistente que busca una imagen real para una receta ya existente. "
+        "Devuelve solo un objeto JSON valido, sin markdown, sin texto extra.\n"
+        "Busca una imagen real representativa del plato usando la busqueda web disponible.\n"
+        "Devuelve image_url solo si puedes aportar una URL directa de imagen accesible por HTTP o HTTPS.\n"
+        "Devuelve image_source_url con la pagina donde encontraste la imagen, si existe.\n"
+        "Nunca inventes URLs ni dominios.\n"
+        "Si no encuentras una imagen real verificable, devuelve image_url null y image_lookup_status \"not_found\".\n"
+        f"Receta: {json.dumps(lookup_context, ensure_ascii=False)}\n"
+        "Formato exacto: "
+        "{\"image_url\":\"https://example.com/imagen.jpg\",\"image_source_url\":\"https://example.com/receta\","
+        "\"image_alt_text\":\"...\",\"image_lookup_status\":\"found\",\"image_lookup_reason\":\"...\"}"
     )
 
 

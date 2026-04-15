@@ -19,6 +19,7 @@ Aplicacion web para crear menus semanales a partir de ingredientes disponibles, 
 - Repeticion de recetas guardadas en un hueco del menu.
 - Recetario con filtro, eliminacion, favoritas y creacion manual de recetas.
 - Detalle editable de receta con foto, ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
+- Resolucion bajo demanda de imagen real para recetas, con validacion minima de `image_url`, fuente y estado de busqueda.
 - Explicacion breve de por que se eligio cada plato.
 - Estado vacio de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
 - Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
@@ -50,6 +51,7 @@ cp .env.example .env
 ```bash
 GEMINI_API_KEY=tu_clave
 GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_ENABLE_GOOGLE_SEARCH=true
 ```
 
 No subas `.env` al repositorio. La clave se usa solo en el backend mediante la variable `GEMINI_API_KEY`; el frontend no la recibe.
@@ -102,6 +104,7 @@ npm run dev
 | ----------------------- | ----------------------------------------------------------- | ---------------------------- |
 | `GEMINI_API_KEY`      | Clave local de Gemini API. Si falta, se usa fallback local. | vacio                        |
 | `GEMINI_MODEL`        | Modelo usado para `generateContent`.                      | `gemini-2.5-flash-lite`    |
+| `GEMINI_ENABLE_GOOGLE_SEARCH` | Activa la busqueda web de Gemini para intentar resolver imagenes reales. | `true` |
 | `DATABASE_URL`        | Conexion SQLAlchemy del backend.                            | SQLite local fuera de Docker |
 | `NEXT_PUBLIC_API_URL` | URL de la API para el navegador.                            | `http://localhost:8000`    |
 
@@ -118,6 +121,12 @@ La clave no debe escribirse en codigo ni commitearse. Google recomienda tratarla
 - La generacion de menus exige al menos 5 ingredientes reales guardados, ya sean introducidos manualmente o cargados mediante el endpoint demo.
 - Los ingredientes excluidos se seleccionan desde los ingredientes existentes en la nevera. Si tras aplicar exclusiones quedan menos de 5 ingredientes disponibles, la app avisa antes de llamar a Gemini o al fallback.
 - El backend pasa como contexto recetas guardadas compatibles y prioriza las favoritas compatibles sin forzarlas si no encajan.
+- La generacion semanal prioriza estabilidad: Gemini construye el menu y las recetas sin intentar resolver imagenes para los 14 platos en la misma llamada.
+- La resolucion de imagenes reales se hace bajo demanda desde el detalle de receta, usando `google_search` solo para esa receta concreta.
+- Con `gemini-2.5-flash-lite`, el uso de tools no se puede combinar con `responseMimeType=application/json`, asi que el backend usa JSON estricto para la generacion del menu y parseo controlado por prompt en la resolucion de imagen.
+- La IA puede devolver `image_url`, `image_source_url`, `image_alt_text`, `image_lookup_status` e `image_lookup_reason` cuando se resuelve una imagen bajo demanda.
+- El backend valida la URL de imagen con una comprobacion HTTP minima y degrada a `image_url = null` cualquier valor sospechoso, no accesible o que no responda como imagen real.
+- Si la IA no encuentra una imagen fiable, la receta sigue siendo valida y el frontend muestra un placeholder limpio con opcion de reintento.
 - El fallback local vive separado en `backend/app/demo_fallback.py` y solo se usa cuando Gemini no esta configurado o cuando la llamada externa falla.
 - Si hay suficientes ingredientes pero no hay clave valida de Gemini, la app avisa antes de generar y permite continuar con modo demo local.
 
@@ -153,6 +162,7 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 6. Sustituye un plato para mostrar el flujo de regeneracion.
 7. Repite una receta guardada desde el selector.
 8. Filtra el recetario, abre una tarjeta, crea una receta manual, marca una favorita y edita raciones, dificultad, foto, ingredientes o pasos.
+9. Abre el detalle de una receta generada para que la app intente resolver una imagen real solo para esa receta, sin bloquear la generacion semanal.
 
 ## Guion sugerido para video de 3 minutos
 
@@ -361,6 +371,23 @@ Refuerza el recetario como fuente real del menu: el usuario puede crear, editar,
 
 **Qué se ajustó después:**
 El backend prioriza favoritas compatibles en el prompt/fallback, pero sigue permitiendo recetas nuevas si las guardadas no encajan con nevera y preferencias.
+
+---
+
+## 8. Metadatos visuales generados por IA
+
+**Herramienta:** Codex / Gemini
+**Objetivo:** Hacer que Gemini intente resolver una imagen real de la receta usando busqueda web, sin inventar URLs.
+
+**Prompt usado:**
+
+> Modifica la generacion para que Gemini use busqueda web y devuelva `image_url` real, `image_source_url`, `image_alt_text`, `image_lookup_status` e `image_lookup_reason`, dejando `image_url` en null cuando no pueda verificar una imagen fiable.
+
+**Por qué funcionó:**
+Permite que la propia llamada a Gemini intente resolver una imagen real del plato y que el backend solo persista lo que pasa una validacion minima.
+
+**Qué se ajustó después:**
+Fue necesario separar la resolucion de imagenes de la generacion semanal: con `gemini-2.5-flash-lite`, buscar 14 recetas con imagen en la misma llamada elevaba el riesgo de `ReadTimeout`, asi que el menu se genera primero y la imagen se resuelve bajo demanda en el detalle.
 
 - 0:00-0:25: problema cotidiano: planificar comidas consume tiempo y se repiten platos.
 - 0:25-0:55: stack y arquitectura: Next.js, FastAPI, PostgreSQL, Docker, Gemini con fallback.

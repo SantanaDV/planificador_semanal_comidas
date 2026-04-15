@@ -28,6 +28,10 @@ type Recipe = {
   difficulty?: string | null;
   servings?: number | null;
   image_url?: string | null;
+  image_source_url?: string | null;
+  image_alt_text?: string | null;
+  image_lookup_status?: "found" | "not_found" | "invalid" | null;
+  image_lookup_reason?: string | null;
   source: string;
   is_favorite: boolean;
 };
@@ -99,6 +103,10 @@ type RecipeMutationPayload = {
   difficulty: string;
   servings: number;
   image_url: string | null;
+  image_source_url?: string | null;
+  image_alt_text?: string | null;
+  image_lookup_status?: "found" | "not_found" | "invalid" | null;
+  image_lookup_reason?: string | null;
   is_favorite: boolean;
 };
 
@@ -144,15 +152,6 @@ const ingredientSortOptions: { value: IngredientSort; label: string }[] = [
   { value: "expiry_desc", label: "Caducidad lejana" },
   { value: "quantity_asc", label: "Cantidad menor" },
   { value: "quantity_desc", label: "Cantidad mayor" },
-];
-const recipeImages = [
-  "https://images.unsplash.com/photo-1540189549336-e6e99c3679fe?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1512621776951-a57141f2eefd?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1473093295043-cdd812d0e601?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1547592180-85f173990554?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?auto=format&fit=crop&w=900&q=80",
-  "https://images.unsplash.com/photo-1482049016688-2d3e1b311543?auto=format&fit=crop&w=900&q=80",
 ];
 const defaultPreferenceSettings: PreferenceSettings = {
   dietType: "Equilibrada",
@@ -286,10 +285,56 @@ function matchesRecipeTime(recipe: Recipe, timeFilter: string) {
   return true;
 }
 
-function getRecipeImage(recipe: Recipe, index: number) {
-  if (recipe.image_url?.trim()) return recipe.image_url.trim();
-  const hash = Array.from(`${recipe.id}${recipe.title}`).reduce((total, letter) => total + letter.charCodeAt(0), index);
-  return recipeImages[hash % recipeImages.length];
+function getRecipeImage(recipe: Recipe) {
+  return recipe.image_url?.trim() || null;
+}
+
+function getRecipeAltText(recipe: Recipe) {
+  return recipe.image_alt_text?.trim() || `Receta ${recipe.title}`;
+}
+
+function getRecipeImageCaption(recipe: Recipe) {
+  return recipe.description || `Imagen de referencia para ${recipe.title}.`;
+}
+
+function getRecipeImageReason(recipe: Recipe) {
+  const normalizedReason = recipe.image_lookup_reason?.trim();
+  const legacyFallbackReason = "El modo demo local no busca imagenes reales en internet.";
+
+  if (getRecipeImage(recipe)) {
+    return normalizedReason || "La receta ya cuenta con una imagen disponible.";
+  }
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) {
+    return "Todavia no se ha intentado resolver una imagen real para esta receta.";
+  }
+  if (recipe.image_lookup_status === "invalid") {
+    return normalizedReason || "Se encontro una referencia, pero no se pudo validar como imagen directa.";
+  }
+  if (normalizedReason === legacyFallbackReason) {
+    return "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.";
+  }
+  if (recipe.source === "fallback-local" && recipe.image_lookup_status === "not_found") {
+    return normalizedReason || "La receta se resolvio con fallback local y todavia no tiene una imagen real.";
+  }
+  return normalizedReason || "No se ha encontrado una imagen real fiable para esta receta.";
+}
+
+function getRecipeImageStatus(recipe: Recipe) {
+  if (getRecipeImage(recipe)) return "Imagen encontrada";
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Imagen pendiente";
+  if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
+  return "Sin imagen disponible";
+}
+
+function getRecipeImageBadge(recipe: Recipe) {
+  if (getRecipeImage(recipe)) return "Foto";
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Pendiente";
+  if (recipe.image_lookup_status === "invalid") return "Sin validar";
+  return "Sin foto";
+}
+
+function getRecipeImageSourceUrl(recipe: Recipe) {
+  return recipe.image_source_url?.trim() || null;
 }
 
 function getRecipeSourceLabel(recipe: Recipe) {
@@ -452,6 +497,53 @@ function getRecipeTip(recipe: Recipe) {
   return `Recomendacion IA: prepara ${mainIngredient.toLowerCase()} justo antes de servir y ajusta sal, acidez y textura al final para que la receta mantenga contraste.`;
 }
 
+function RecipeVisualSurface({
+  compact = false,
+  recipe,
+}: {
+  compact?: boolean;
+  recipe: Recipe;
+}) {
+  const imageUrl = getRecipeImage(recipe);
+  const imageReason = getRecipeImageReason(recipe);
+  const imageCaption = getRecipeImageCaption(recipe);
+
+  if (imageUrl) {
+    return (
+      <img
+        className="h-full w-full object-cover"
+        src={imageUrl}
+        alt={getRecipeAltText(recipe)}
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-label={getRecipeAltText(recipe)}
+      className="relative flex h-full w-full overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(111,180,124,0.28),_transparent_52%),linear-gradient(145deg,_rgba(244,248,242,1),_rgba(227,241,230,1))]"
+      role="img"
+    >
+      <div className="absolute inset-0 bg-[linear-gradient(135deg,transparent_0,transparent_45%,rgba(31,37,34,0.04)_45%,rgba(31,37,34,0.04)_55%,transparent_55%,transparent_100%)]" />
+      <div className={`relative z-10 flex h-full w-full flex-col justify-between ${compact ? "p-4" : "p-6"}`}>
+        <div className="flex items-center justify-between gap-3">
+          <span className="rounded-lg border border-white/70 bg-white/80 px-3 py-1 text-xs font-semibold text-leaf shadow-soft">
+            {getRecipeImageBadge(recipe)}
+          </span>
+        </div>
+        <div>
+          <p className={`${compact ? "line-clamp-3 text-sm" : "text-base"} font-semibold leading-6 text-ink`}>
+            {imageCaption}
+          </p>
+          <p className={`mt-3 ${compact ? "text-xs" : "text-sm"} leading-5 text-ink/70`}>
+            {imageReason}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function toLocalDateKey(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -495,6 +587,7 @@ export default function Home() {
   const [ingredientFiltersOpen, setIngredientFiltersOpen] = useState(false);
   const [ingredientModalOpen, setIngredientModalOpen] = useState(false);
   const [recipeModalOpen, setRecipeModalOpen] = useState(false);
+  const [resolvingRecipeImageId, setResolvingRecipeImageId] = useState<string | null>(null);
   const [selectedRecipes, setSelectedRecipes] = useState<Record<string, string>>({});
   const [ingredientForm, setIngredientForm] = useState<IngredientForm>(() => buildDefaultIngredientForm([]));
   const [recipeForm, setRecipeForm] = useState<RecipeEditForm>(() => buildEmptyRecipeForm());
@@ -726,6 +819,39 @@ export default function Home() {
       return null;
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function resolveRecipeImage(recipeId: string) {
+    setResolvingRecipeImageId(recipeId);
+    try {
+      const data = await api<Recipe>(`/recipes/${recipeId}/resolve-image`, {
+        method: "POST",
+      });
+      setRecipes((current) => current.map((recipe) => (recipe.id === data.id ? data : recipe)));
+      setMenu((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) => (item.recipe?.id === data.id ? { ...item, recipe: data } : item)),
+            }
+          : current,
+      );
+      setSelectedRecipeId(data.id);
+      setMessage(data.image_url ? "Imagen real resuelta para la receta." : getRecipeImageReason(data));
+      reportClientLog("info", "Resolucion de imagen lanzada desde frontend", {
+        action: "resolve_recipe_image",
+        recipe_id: data.id,
+        image_lookup_status: data.image_lookup_status,
+        has_image_url: Boolean(data.image_url),
+      });
+      return data;
+    } catch (error) {
+      setMessage(getErrorMessage(error, "Error al resolver la imagen de la receta."));
+      reportClientLog("error", "Error resolviendo imagen desde frontend", { action: "resolve_recipe_image", recipe_id: recipeId }, error);
+      return null;
+    } finally {
+      setResolvingRecipeImageId((current) => (current === recipeId ? null : current));
     }
   }
 
@@ -1102,12 +1228,14 @@ export default function Home() {
 
             {activeView === "recipeDetail" ? (
               <RecipeDetailView
+                aiEnabled={Boolean(aiStatus?.configured)}
+                imageResolutionPending={resolvingRecipeImageId === selectedRecipeId}
                 loading={loading}
                 onBack={() => setActiveView("recipes")}
+                onResolveRecipeImage={resolveRecipeImage}
                 onUpdateRecipe={updateRecipe}
                 onUseInMenu={useRecipeFromDetail}
                 recipe={selectedRecipe}
-                recipeIndex={selectedRecipe ? recipes.findIndex((recipe) => recipe.id === selectedRecipe.id) : 0}
               />
             ) : null}
 
@@ -2299,7 +2427,7 @@ function RecipesView({
         </div>
       ) : (
         <div className="grid gap-5 md:grid-cols-2 2xl:grid-cols-3">
-          {filteredRecipes.map((recipe, index) => {
+          {filteredRecipes.map((recipe) => {
             const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
             return (
               <article
@@ -2317,11 +2445,9 @@ function RecipesView({
                 tabIndex={0}
               >
                 <div className="relative h-44 overflow-hidden bg-leaf/10">
-                  <img
-                    className="h-full w-full object-cover transition duration-500 ease-out group-hover:scale-105"
-                    src={getRecipeImage(recipe, index)}
-                    alt={`Receta ${recipe.title}`}
-                  />
+                  <div className="h-full w-full transition duration-500 ease-out group-hover:scale-105">
+                    <RecipeVisualSurface compact recipe={recipe} />
+                  </div>
                   <div className="absolute inset-0 bg-ink/0 transition duration-300 group-hover:bg-ink/10" />
                   <span className="absolute left-4 top-4 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-leaf shadow-soft transition duration-200 group-hover:-translate-y-0.5">
                     {getRecipeSourceLabel(recipe)}
@@ -2409,29 +2535,44 @@ function RecipesView({
 }
 
 function RecipeDetailView({
+  aiEnabled,
+  imageResolutionPending,
   loading,
   onBack,
+  onResolveRecipeImage,
   onUpdateRecipe,
   onUseInMenu,
   recipe,
-  recipeIndex,
 }: {
+  aiEnabled: boolean;
+  imageResolutionPending: boolean;
   loading: boolean;
   onBack: () => void;
+  onResolveRecipeImage: (recipeId: string) => Promise<Recipe | null>;
   onUpdateRecipe: (recipeId: string, payload: RecipeUpdatePayload) => Promise<Recipe | null>;
   onUseInMenu: (recipe: Recipe) => void;
   recipe: Recipe | null;
-  recipeIndex: number;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [localError, setLocalError] = useState("");
+  const [autoResolveRequestedFor, setAutoResolveRequestedFor] = useState<string | null>(null);
   const [draft, setDraft] = useState<RecipeEditForm | null>(() => (recipe ? buildRecipeEditForm(recipe) : null));
 
   useEffect(() => {
     setIsEditing(false);
     setLocalError("");
+    setAutoResolveRequestedFor(null);
     setDraft(recipe ? buildRecipeEditForm(recipe) : null);
   }, [recipe]);
+
+  useEffect(() => {
+    if (!recipe || !aiEnabled || imageResolutionPending) return;
+    if (autoResolveRequestedFor === recipe.id) return;
+    if (getRecipeImage(recipe)) return;
+    if (recipe.image_lookup_status !== null && recipe.image_lookup_status !== undefined) return;
+    setAutoResolveRequestedFor(recipe.id);
+    void onResolveRecipeImage(recipe.id);
+  }, [aiEnabled, autoResolveRequestedFor, imageResolutionPending, onResolveRecipeImage, recipe]);
 
   if (!recipe || !draft) {
     return (
@@ -2447,6 +2588,11 @@ function RecipeDetailView({
   const difficulty = getRecipeDifficulty(recipe.prep_time_minutes, recipe.difficulty);
   const servings = getRecipeServings(recipe);
   const ingredientRows = recipe.ingredients.length ? recipe.ingredients.map(parseIngredientLine) : [];
+  const canResolveImage = aiEnabled && !getRecipeImage(recipe) && !isEditing;
+  const imageActionLabel =
+    recipe.image_lookup_status === "invalid" || recipe.image_lookup_status === "not_found"
+      ? "Reintentar imagen real"
+      : "Buscar imagen real";
 
   function updateIngredient(index: number, field: keyof RecipeIngredientDraft, value: string) {
     setDraft((current) =>
@@ -2677,7 +2823,9 @@ function RecipeDetailView({
       <section className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
         <div className="space-y-5">
           <div className="overflow-hidden rounded-lg border border-line bg-white shadow-soft">
-            <img className="h-80 w-full object-cover" src={getRecipeImage(recipe, Math.max(recipeIndex, 0))} alt={`Receta ${recipe.title}`} />
+            <div className="h-80 w-full">
+              <RecipeVisualSurface recipe={recipe} />
+            </div>
           </div>
 
           <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
@@ -2707,6 +2855,45 @@ function RecipeDetailView({
                 )}
               </div>
             )}
+          </div>
+
+          <div className="rounded-lg border border-line bg-white p-5 shadow-soft">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xl font-semibold">Imagen de la receta</h3>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <span className="text-xs font-semibold uppercase text-ink/55">
+                  {getRecipeImageStatus(recipe)}
+                </span>
+                {canResolveImage ? (
+                  <button
+                    className="rounded-lg border border-leaf px-3 py-2 text-xs font-semibold text-leaf disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={imageResolutionPending || loading}
+                    onClick={() => void onResolveRecipeImage(recipe.id)}
+                    type="button"
+                  >
+                    {imageResolutionPending ? "Buscando..." : imageActionLabel}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <p className="mt-4 text-sm leading-6 text-ink/75">{getRecipeImageCaption(recipe)}</p>
+            <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Texto alternativo</p>
+            <p className="mt-1 text-sm leading-6 text-ink/70">{getRecipeAltText(recipe)}</p>
+            {getRecipeImageSourceUrl(recipe) ? (
+              <>
+                <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Fuente</p>
+                <a
+                  className="mt-1 inline-flex text-sm font-semibold text-leaf hover:text-ink"
+                  href={getRecipeImageSourceUrl(recipe) || "#"}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Abrir pagina fuente
+                </a>
+              </>
+            ) : null}
+            <p className="mt-3 text-xs font-semibold uppercase text-ink/55">Estado</p>
+            <p className="mt-1 text-sm leading-6 text-ink/70">{getRecipeImageReason(recipe)}</p>
           </div>
 
           <div className="rounded-lg border border-leaf/20 bg-leaf/5 p-5">

@@ -31,7 +31,7 @@ def build_weekly_menu(
             )
     return {
         "items": items,
-        "notes": "Menu creado con fallback local controlado para garantizar ejecucion sin clave de Gemini.",
+        "notes": "Menu creado con fallback local controlado.",
     }
 
 
@@ -79,7 +79,12 @@ def build_replacement_item(
                 "difficulty": str(saved_recipe.get("difficulty") or "Facil"),
                 "servings": int(saved_recipe.get("servings") or 2),
                 "image_url": str(saved_recipe.get("image_url") or "")[:500],
+                "image_source_url": str(saved_recipe.get("image_source_url") or "")[:500] or None,
+                "image_alt_text": str(saved_recipe.get("image_alt_text") or "")[:240] or None,
+                "image_lookup_status": _saved_recipe_image_lookup_status(saved_recipe),
+                "image_lookup_reason": str(saved_recipe.get("image_lookup_reason") or "")[:240] or None,
                 "is_favorite": bool(saved_recipe.get("is_favorite")),
+                "source": str(saved_recipe.get("source") or "fallback-local")[:120],
             },
         }
 
@@ -119,6 +124,12 @@ def build_replacement_item(
             ],
             "tags": tags,
             "prep_time_minutes": 25 + (offset % 3) * 5,
+            "image_url": None,
+            "image_source_url": None,
+            "image_alt_text": f"Imagen no disponible para la receta {title}.",
+            "image_lookup_status": "not_found",
+            "image_lookup_reason": "La receta se resolvio con fallback local y no incluye busqueda real de imagenes.",
+            "source": "fallback-local",
         },
     }
 
@@ -139,3 +150,12 @@ def _pick_saved_recipe(
             continue
         return recipe
     return None
+
+
+def _saved_recipe_image_lookup_status(recipe: dict[str, Any]) -> str:
+    status = str(recipe.get("image_lookup_status") or "").strip().lower()
+    if status in {"found", "not_found", "invalid"}:
+        return status
+    if str(recipe.get("image_url") or "").strip():
+        return "found"
+    return "not_found"

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_enable_google_search: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

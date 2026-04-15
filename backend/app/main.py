@@ -288,8 +288,10 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
             value = [item.strip() for item in value if item.strip()]
         elif isinstance(value, str):
             value = value.strip()
-            if field == "image_url" and not value:
+            if field in {"image_url", "image_source_url", "image_alt_text", "image_lookup_reason"} and not value:
                 value = None
+            if field == "image_lookup_status":
+                value = _normalize_image_lookup_status(value, changes.get("image_url", recipe.image_url))
         setattr(recipe, field, value)
 
     session.commit()
@@ -299,6 +301,47 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
         "database",
         "Receta actualizada",
         {"recipe_id": recipe.id, "updated_fields": sorted(changes.keys())},
+    )
+    return recipe
+
+
+@app.post("/recipes/{recipe_id}/resolve-image", response_model=RecipeOut)
+def resolve_recipe_image(recipe_id: str, session: Session = Depends(get_session)) -> Recipe:
+    recipe = session.get(Recipe, recipe_id)
+    if not recipe or recipe.user_id != DEMO_USER_ID:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
+
+    if not settings.has_valid_gemini_api_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
+
+    image_payload = ai.resolve_recipe_image(_recipe_to_dict(recipe))
+    if image_payload:
+        recipe.image_url = image_payload.get("image_url")
+        recipe.image_source_url = image_payload.get("image_source_url")
+        recipe.image_alt_text = image_payload.get("image_alt_text")
+        recipe.image_lookup_status = _normalize_image_lookup_status(
+            image_payload.get("image_lookup_status"),
+            image_payload.get("image_url"),
+        )
+        recipe.image_lookup_reason = image_payload.get("image_lookup_reason")
+    else:
+        recipe.image_url = None
+        recipe.image_source_url = None
+        recipe.image_alt_text = None
+        recipe.image_lookup_status = "not_found"
+        recipe.image_lookup_reason = "No se pudo resolver una imagen con IA en este momento."
+
+    session.commit()
+    session.refresh(recipe)
+    record_log(
+        "info",
+        "ai",
+        "Resolucion de imagen de receta completada",
+        {
+            "recipe_id": recipe.id,
+            "image_lookup_status": recipe.image_lookup_status,
+            "has_image_url": bool(recipe.image_url),
+        },
     )
     return recipe
 
@@ -599,6 +642,14 @@ def ensure_recipe_edit_columns() -> None:
         statements.append(("servings", "ALTER TABLE recipes ADD COLUMN servings INTEGER NOT NULL DEFAULT 2"))
     if "image_url" not in columns:
         statements.append(("image_url", "ALTER TABLE recipes ADD COLUMN image_url TEXT"))
+    if "image_source_url" not in columns:
+        statements.append(("image_source_url", "ALTER TABLE recipes ADD COLUMN image_source_url TEXT"))
+    if "image_alt_text" not in columns:
+        statements.append(("image_alt_text", "ALTER TABLE recipes ADD COLUMN image_alt_text TEXT"))
+    if "image_lookup_status" not in columns:
+        statements.append(("image_lookup_status", "ALTER TABLE recipes ADD COLUMN image_lookup_status VARCHAR(40)"))
+    if "image_lookup_reason" not in columns:
+        statements.append(("image_lookup_reason", "ALTER TABLE recipes ADD COLUMN image_lookup_reason TEXT"))
     if "is_favorite" not in columns:
         statements.append(("is_favorite", "ALTER TABLE recipes ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT FALSE"))
 
@@ -778,6 +829,8 @@ def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
 
 def _create_recipe_from_payload(session: Session, payload: dict[str, Any], source: str) -> Recipe:
     prep_time_minutes = payload.get("prep_time_minutes", 25)
+    image_fields = _normalize_recipe_image_fields(payload)
+    persisted_source = str(payload.get("source") or source or "fallback-local").strip()[:120] or "fallback-local"
     recipe = Recipe(
         user_id=DEMO_USER_ID,
         title=payload["title"],
@@ -788,8 +841,12 @@ def _create_recipe_from_payload(session: Session, payload: dict[str, Any], sourc
         prep_time_minutes=prep_time_minutes,
         difficulty=payload.get("difficulty") or _difficulty_from_minutes(prep_time_minutes),
         servings=payload.get("servings", 2),
-        image_url=payload.get("image_url") or None,
-        source=source,
+        image_url=image_fields["image_url"],
+        image_source_url=image_fields["image_source_url"],
+        image_alt_text=image_fields["image_alt_text"],
+        image_lookup_status=image_fields["image_lookup_status"],
+        image_lookup_reason=image_fields["image_lookup_reason"],
+        source=persisted_source,
         is_favorite=bool(payload.get("is_favorite", False)),
     )
     session.add(recipe)
@@ -804,7 +861,7 @@ def _recipe_create_payload(payload: RecipeCreate) -> dict[str, Any]:
     data["steps"] = [item.strip() for item in data["steps"] if item.strip()]
     data["tags"] = [item.strip() for item in data["tags"] if item.strip()]
     data["difficulty"] = data["difficulty"].strip()
-    data["image_url"] = data["image_url"].strip() if data.get("image_url") else None
+    data.update(_normalize_recipe_image_fields(data))
     data["source"] = data["source"].strip() or "manual"
     return data
 
@@ -821,10 +878,46 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "difficulty": recipe.difficulty or _difficulty_from_minutes(recipe.prep_time_minutes),
         "servings": recipe.servings or 2,
         "image_url": recipe.image_url,
+        "image_source_url": recipe.image_source_url,
+        "image_alt_text": recipe.image_alt_text,
+        "image_lookup_status": _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url),
+        "image_lookup_reason": recipe.image_lookup_reason,
         "source": recipe.source,
         "is_favorite": recipe.is_favorite,
         "created_at": recipe.created_at,
     }
+
+
+def _normalize_recipe_image_fields(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    image_url = _clean_optional_string(payload.get("image_url"), 500)
+    image_source_url = _clean_optional_string(payload.get("image_source_url"), 500)
+    image_alt_text = _clean_optional_string(payload.get("image_alt_text"), 240)
+    image_lookup_reason = _clean_optional_string(payload.get("image_lookup_reason"), 240)
+    image_lookup_status = _normalize_image_lookup_status(payload.get("image_lookup_status"), image_url)
+    return {
+        "image_url": image_url,
+        "image_source_url": image_source_url,
+        "image_alt_text": image_alt_text,
+        "image_lookup_status": image_lookup_status,
+        "image_lookup_reason": image_lookup_reason,
+    }
+
+
+def _clean_optional_string(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned[:limit] if cleaned else None
+
+
+def _normalize_image_lookup_status(value: Any, image_url: Any = None) -> str | None:
+    status = str(value or "").strip().lower()
+    if status in {"found", "not_found", "invalid"}:
+        return status
+    if isinstance(image_url, str) and image_url.strip():
+        return "found"
+    return None
 
 
 def _difficulty_from_minutes(minutes: int) -> str:
@@ -931,6 +1024,10 @@ def _compatible_saved_recipe_context(
                 "difficulty": recipe.difficulty or _difficulty_from_minutes(recipe.prep_time_minutes),
                 "servings": recipe.servings or 2,
                 "image_url": recipe.image_url,
+                "image_source_url": recipe.image_source_url,
+                "image_alt_text": recipe.image_alt_text,
+                "image_lookup_status": _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url),
+                "image_lookup_reason": recipe.image_lookup_reason,
                 "source": recipe.source,
                 "is_favorite": recipe.is_favorite,
                 "is_recent": normalize_label(recipe.title) in recent_titles,
