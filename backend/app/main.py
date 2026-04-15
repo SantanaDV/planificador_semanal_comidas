@@ -35,7 +35,28 @@ from .schemas import (
 
 DEMO_USER_ID = "demo-user"
 MIN_INGREDIENTS_FOR_MENU = 5
-PANTRY_BASICS = ["aceite de oliva", "sal", "pimienta", "sal y pimienta", "agua"]
+PANTRY_SUPPORT_BASICS = [
+    "aceite de oliva",
+    "sal",
+    "pimienta",
+    "agua",
+    "ajo",
+    "cebolla",
+    "limon",
+    "oregano",
+    "pimenton dulce",
+    "comino",
+]
+PANTRY_STRUCTURAL_BASICS = [
+    "mantequilla",
+    "harina",
+    "leche",
+    "caldo",
+    "salsa de tomate basica",
+]
+PANTRY_BASICS = [*PANTRY_SUPPORT_BASICS, *PANTRY_STRUCTURAL_BASICS]
+MAX_PANTRY_INGREDIENTS_PER_RECIPE = 3
+MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE = 1
 
 
 @asynccontextmanager
@@ -111,7 +132,7 @@ def ai_status() -> AiStatusOut:
         configured=configured,
         mode="ai" if configured else "fallback",
         message=(
-            "Gemini configurado. La generacion usara IA real."
+            "Gemini configurado. El menu semanal se genera con IA real, prioriza la nevera y admite una despensa basica limitada."
             if configured
             else "Gemini no esta configurado. La generacion usara fallback local de demo."
         ),
@@ -423,6 +444,27 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
     )
     try:
         generated = ai.generate_weekly_menu(ingredients, generation_context)
+    except ai.WeeklyMenuResolutionError as exc:
+        record_log(
+            "warning",
+            "menu_planning",
+            "No se pudo cerrar un menu semanal 100% IA tras reparacion dirigida",
+            {
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "compatible_recipe_count": len(compatible_recipe_titles),
+                "favorite_recipe_count": len(favorite_recipe_titles),
+                **exc.context,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "La IA no pudo cerrar un menu semanal valido con las reglas actuales. "
+                "Prueba a regenerar o revisa los ingredientes disponibles."
+            ),
+        ) from exc
     except Exception as exc:
         record_exception(
             "menu_planning",
@@ -997,9 +1039,14 @@ def _compatible_saved_recipe_context(
         ):
             continue
         matched_ingredients: list[str] = []
+        pantry_ingredients: list[str] = []
+        structural_pantry_ingredients: list[str] = []
         incompatible = False
         for recipe_name in recipe_ingredient_names:
             if _is_pantry_basic(recipe_name):
+                pantry_ingredients.append(recipe_name)
+                if _is_structural_pantry_basic(recipe_name):
+                    structural_pantry_ingredients.append(recipe_name)
                 continue
             matched_name = next(
                 (usable_name for usable_name in usable_names if _ingredient_name_matches(recipe_name, usable_name)),
@@ -1010,7 +1057,15 @@ def _compatible_saved_recipe_context(
                 break
             matched_ingredients.append(matched_name)
 
-        if incompatible or not matched_ingredients:
+        if (
+            incompatible
+            or not matched_ingredients
+            or not _recipe_uses_reasonable_pantry_support(
+                fridge_ingredient_count=len(set(matched_ingredients)),
+                pantry_ingredient_count=len(dict.fromkeys(pantry_ingredients)),
+                structural_pantry_count=len(dict.fromkeys(structural_pantry_ingredients)),
+            )
+        ):
             continue
         compatible_recipes.append(
             {
@@ -1056,11 +1111,60 @@ def _normalize_recipe_ingredient_name(value: str) -> str:
 def _ingredient_name_matches(recipe_name: str, fridge_name: str) -> bool:
     if len(recipe_name) < 3 or len(fridge_name) < 3:
         return False
-    return recipe_name in fridge_name or fridge_name in recipe_name
+    if recipe_name == fridge_name:
+        return True
+    recipe_tokens = _ingredient_match_tokens(recipe_name)
+    fridge_tokens = _ingredient_match_tokens(fridge_name)
+    if not recipe_tokens or not fridge_tokens:
+        return False
+    shorter, longer = (
+        (recipe_tokens, fridge_tokens)
+        if len(recipe_tokens) <= len(fridge_tokens)
+        else (fridge_tokens, recipe_tokens)
+    )
+    return all(token in longer for token in shorter)
+
+
+def _ingredient_match_tokens(value: str) -> list[str]:
+    stopwords = {"de", "del", "la", "el", "los", "las", "y", "con", "al", "a", "en"}
+    tokens = [token for token in value.split() if token]
+    normalized_tokens = []
+    for token in tokens:
+        if token in stopwords:
+            continue
+        if len(token) > 4 and token.endswith("s"):
+            token = token[:-1]
+        normalized_tokens.append(token)
+    return normalized_tokens
 
 
 def _is_pantry_basic(recipe_name: str) -> bool:
     return any(_ingredient_name_matches(recipe_name, normalize_label(value)) for value in PANTRY_BASICS)
+
+
+def _is_structural_pantry_basic(recipe_name: str) -> bool:
+    return any(_ingredient_name_matches(recipe_name, normalize_label(value)) for value in PANTRY_STRUCTURAL_BASICS)
+
+
+def _recipe_uses_reasonable_pantry_support(
+    *,
+    fridge_ingredient_count: int,
+    pantry_ingredient_count: int,
+    structural_pantry_count: int,
+) -> bool:
+    if fridge_ingredient_count <= 0:
+        return False
+    if pantry_ingredient_count > MAX_PANTRY_INGREDIENTS_PER_RECIPE:
+        return False
+    if fridge_ingredient_count > 1 and pantry_ingredient_count > fridge_ingredient_count:
+        return False
+    if structural_pantry_count > MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE:
+        return False
+    if fridge_ingredient_count == 1 and pantry_ingredient_count > 2:
+        return False
+    if fridge_ingredient_count == 1 and structural_pantry_count > 0:
+        return False
+    return True
 
 
 def _build_generation_context(
@@ -1095,6 +1199,14 @@ def _build_generation_context(
         "compatible_recipe_titles": compatible_recipe_titles,
         "favorite_recipe_titles": favorite_recipe_titles,
         "pantry_basics": PANTRY_BASICS,
+        "pantry_support_basics": PANTRY_SUPPORT_BASICS,
+        "pantry_structural_basics": PANTRY_STRUCTURAL_BASICS,
+        "pantry_policy": {
+            "max_pantry_ingredients_per_recipe": MAX_PANTRY_INGREDIENTS_PER_RECIPE,
+            "max_structural_pantry_ingredients_per_recipe": MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE,
+            "single_fridge_ingredient_allows_structural_pantry": False,
+            "single_fridge_ingredient_max_pantry": 2,
+        },
     }
 
 
@@ -1137,6 +1249,10 @@ def _preferences_with_compatible_recipes(
             "Basicos de despensa permitidos solo como apoyo y nunca como ingrediente principal: "
             + ", ".join(PANTRY_BASICS)
             + "."
+        )
+        parts.append(
+            "No debe haber mas ingredientes de despensa que ingredientes reales de nevera en una receta, "
+            f"y solo se permite un ingrediente estructural de despensa por plato."
         )
     return " ".join(part for part in parts if part)
 
