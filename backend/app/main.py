@@ -343,6 +343,9 @@ def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), ses
     if not settings.has_valid_gemini_api_key:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Gemini no esta configurado")
 
+    if _image_resolution_cooldown_active(recipe):
+        return recipe
+
     if not force and _should_skip_image_resolution(recipe):
         return recipe
 
@@ -372,6 +375,16 @@ def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session 
     query = select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc())
     recipes = list(session.scalars(query))
     requested_ids = {recipe_id.strip() for recipe_id in payload.recipe_ids if recipe_id.strip()}
+    if not requested_ids:
+        return ResolveRecipeImagesOut(
+            updated_recipes=[],
+            attempted_count=0,
+            updated_count=0,
+            skipped_count=0,
+            remaining_pending_count=0,
+            stopped_reason=None,
+            message="Indica recetas concretas si quieres resolver imagenes en lote.",
+        )
     if requested_ids:
         recipes = [recipe for recipe in recipes if recipe.id in requested_ids]
 
@@ -1098,6 +1111,14 @@ def _needs_image_resolution(recipe: Recipe) -> bool:
         retry_after = _coerce_utc_datetime(recipe.image_lookup_retry_after)
         return retry_after is None or retry_after <= _utcnow()
     return True
+
+
+def _image_resolution_cooldown_active(recipe: Recipe) -> bool:
+    status = _normalize_image_lookup_status(recipe.image_lookup_status)
+    if status not in {"rate_limited", "upstream_error"}:
+        return False
+    retry_after = _coerce_utc_datetime(recipe.image_lookup_retry_after)
+    return retry_after is not None and retry_after > _utcnow()
 
 
 def _should_skip_image_resolution(recipe: Recipe) -> bool:

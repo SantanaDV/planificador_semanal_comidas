@@ -132,24 +132,6 @@ type MenuGenerationFeedback = {
   cooldownSeconds: number | null;
 };
 
-type RecipeImageBatchFeedback = {
-  phase: MenuGenerationPhase;
-  message: string;
-  cooldownSeconds: number | null;
-  attemptedCount: number;
-  remainingCount: number;
-};
-
-type ResolveRecipeImagesResponse = {
-  updated_recipes: Recipe[];
-  attempted_count: number;
-  updated_count: number;
-  skipped_count: number;
-  remaining_pending_count: number;
-  stopped_reason: "found" | "not_found" | "invalid" | "rate_limited" | "upstream_error" | null;
-  message: string;
-};
-
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MIN_INGREDIENTS_FOR_MENU = 5;
 const PREFERENCES_STORAGE_KEY = "menuplan-preference-settings";
@@ -353,7 +335,7 @@ function getRecipeImageReason(recipe: Recipe) {
     return normalizedReason || "La receta ya cuenta con una imagen real validada.";
   }
   if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) {
-    return "Todavia no se ha intentado resolver una imagen real para esta receta.";
+    return "Todavia no se ha intentado resolver una imagen real para esta receta. La busqueda solo se lanza al abrir el detalle o al pedirla manualmente.";
   }
   if (recipe.image_lookup_status === "rate_limited") {
     return normalizedReason || "La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini.";
@@ -375,7 +357,7 @@ function getRecipeImageReason(recipe: Recipe) {
 
 function getRecipeImageStatus(recipe: Recipe) {
   if (getRecipeImage(recipe)) return "Imagen encontrada";
-  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Imagen pendiente";
+  if (recipe.image_lookup_status === null || recipe.image_lookup_status === undefined) return "Pendiente de resolver";
   if (recipe.image_lookup_status === "rate_limited") return "Resolucion pausada";
   if (recipe.image_lookup_status === "upstream_error") return "Error temporal de resolucion";
   if (recipe.image_lookup_status === "invalid") return "Imagen descartada";
@@ -411,12 +393,7 @@ function canAutoResolveRecipeImage(recipe: Recipe) {
   if (getRecipeImage(recipe)) return false;
   if (recipe.source === "manual") return false;
   const status = recipe.image_lookup_status;
-  if (status === null || status === undefined) return true;
-  if (status === "rate_limited" || status === "upstream_error") {
-    const retryAfter = parseIsoDate(recipe.image_lookup_retry_after);
-    return !retryAfter || retryAfter.getTime() <= Date.now();
-  }
-  return false;
+  return status === null || status === undefined;
 }
 
 function getRecipeSourceLabel(recipe: Recipe) {
@@ -705,14 +682,6 @@ export default function Home() {
     message: "",
     cooldownSeconds: null,
   });
-  const [recipeImageAutoResolutionStarted, setRecipeImageAutoResolutionStarted] = useState(false);
-  const [recipeImageBatchFeedback, setRecipeImageBatchFeedback] = useState<RecipeImageBatchFeedback>({
-    phase: "idle",
-    message: "",
-    cooldownSeconds: null,
-    attemptedCount: 0,
-    remainingCount: 0,
-  });
   const imageResolutionRequestsInFlight = useRef<Set<string>>(new Set());
   const preferences = useMemo(() => buildPreferencesSummary(preferenceSettings, ingredients), [ingredients, preferenceSettings]);
   const usableIngredients = useMemo(
@@ -790,23 +759,6 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [menuGenerationFeedback.phase, menuGenerationFeedback.cooldownSeconds]);
 
-  useEffect(() => {
-    if (recipeImageBatchFeedback.phase !== "rate_limited" || !recipeImageBatchFeedback.cooldownSeconds || recipeImageBatchFeedback.cooldownSeconds <= 0) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      setRecipeImageBatchFeedback((current) => {
-        if (current.phase !== "rate_limited" || !current.cooldownSeconds || current.cooldownSeconds <= 0) {
-          return current;
-        }
-        return { ...current, cooldownSeconds: Math.max(current.cooldownSeconds - 1, 0) };
-      });
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [recipeImageBatchFeedback.phase, recipeImageBatchFeedback.cooldownSeconds]);
-
   const groupedMenu = useMemo(() => {
     const groups = new Map<number, MenuItem[]>();
     for (const item of menu?.items ?? []) {
@@ -866,10 +818,6 @@ export default function Home() {
   const latestRecipes = recipes.slice(0, 4);
   const expiringIngredients = useMemo(() => sortIngredients(ingredients, "expiry_asc").slice(0, 4), [ingredients]);
   const recipeTags = ["Todas", ...Array.from(new Set(recipes.flatMap((recipe) => recipe.tags))).slice(0, 10)];
-  const pendingRecipeImageIds = useMemo(
-    () => recipes.filter(canAutoResolveRecipeImage).map((recipe) => recipe.id),
-    [recipes],
-  );
   const navItems: { id: Exclude<ViewId, "recipeDetail">; label: string; description: string }[] = [
     { id: "dashboard", label: "Dashboard", description: "Resumen" },
     { id: "menu", label: "Menu semanal", description: "Plan de 7 dias" },
@@ -893,22 +841,6 @@ export default function Home() {
           description: "Consulta completa y edicion preparada para recetario.",
         }
       : (navItems.find((item) => item.id === activeView) ?? navItems[0]);
-
-  useEffect(() => {
-    if (activeView !== "recipes") {
-      setRecipeImageAutoResolutionStarted(false);
-    }
-  }, [activeView]);
-
-  useEffect(() => {
-    if (activeView !== "recipes") return;
-    if (!aiStatus?.configured) return;
-    if (!pendingRecipeImageIds.length) return;
-    if (recipeImageAutoResolutionStarted) return;
-    if (recipeImageBatchFeedback.phase === "loading") return;
-    setRecipeImageAutoResolutionStarted(true);
-    void resolveRecipeImagesBatch(pendingRecipeImageIds.slice(0, 4));
-  }, [activeView, aiStatus?.configured, pendingRecipeImageIds, recipeImageBatchFeedback.phase, recipeImageAutoResolutionStarted]);
 
   function savePreferences() {
     setMessage("Preferencias guardadas para la proxima generacion.");
@@ -1017,51 +949,20 @@ export default function Home() {
     }
   }
 
-  async function resolveRecipeImagesBatch(recipeIds?: string[]) {
-    if (!aiStatus?.configured) return null;
-    setRecipeImageBatchFeedback({
-      phase: "loading",
-      message: "Generando imagenes para las recetas nuevas. Estamos resolviendo paginas fuente y validando metadatos.",
-      cooldownSeconds: null,
-      attemptedCount: 0,
-      remainingCount: recipeIds?.length ?? pendingRecipeImageIds.length,
-    });
-
-    try {
-      const data = await api<ResolveRecipeImagesResponse>("/recipes/resolve-images", {
-        method: "POST",
-        body: JSON.stringify({ recipe_ids: recipeIds ?? [], limit: 4, force: false }),
-      });
-      mergeResolvedRecipes(data.updated_recipes);
-      const uiMessage =
-        data.stopped_reason === "rate_limited"
-          ? `La resolucion de imagenes esta pausada temporalmente por saturacion de Gemini. ${data.message}`
-          : data.stopped_reason === "upstream_error"
-            ? `La resolucion de imagenes encontro un error temporal del proveedor o de la pagina fuente. ${data.message}`
-            : data.message;
-      setRecipeImageBatchFeedback({
-        phase: data.stopped_reason === "rate_limited" ? "rate_limited" : data.stopped_reason === "upstream_error" ? "error" : "success",
-        message: uiMessage,
-        cooldownSeconds: data.stopped_reason === "rate_limited" ? parseCooldownSeconds(data.message) : null,
-        attemptedCount: data.attempted_count,
-        remainingCount: data.remaining_pending_count,
-      });
-      return data;
-    } catch (error) {
-      const errorMessage = getErrorMessage(error, "Error al resolver imagenes de recetas.");
-      setRecipeImageBatchFeedback({
-        phase: "error",
-        message: errorMessage,
-        cooldownSeconds: null,
-        attemptedCount: 0,
-        remainingCount: recipeIds?.length ?? pendingRecipeImageIds.length,
-      });
-      reportClientLog("error", "Error resolviendo imagenes en lote desde frontend", { action: "resolve_recipe_images_batch" }, error);
-      return null;
-    }
-  }
-
   async function resolveRecipeImage(recipeId: string, force = false) {
+    const currentRecipe = recipes.find((recipe) => recipe.id === recipeId) ?? null;
+    const cooldownSeconds =
+      currentRecipe && (currentRecipe.image_lookup_status === "rate_limited" || currentRecipe.image_lookup_status === "upstream_error")
+        ? getRetryAfterSeconds(currentRecipe.image_lookup_retry_after)
+        : null;
+    if (cooldownSeconds && cooldownSeconds > 0) {
+      if (force) {
+        setMessage(
+          `La resolucion de imagenes sigue en pausa para esta receta. Espera ${formatRetryCountdown(cooldownSeconds)} antes de reintentar.`,
+        );
+      }
+      return currentRecipe;
+    }
     if (imageResolutionRequestsInFlight.current.has(recipeId)) {
       return null;
     }
@@ -1501,7 +1402,6 @@ export default function Home() {
 
             {activeView === "recipes" ? (
               <RecipesView
-                imageBatchFeedback={recipeImageBatchFeedback}
                 filteredRecipes={filteredRecipes}
                 difficultyFilter={recipeDifficultyFilter}
                 loading={loading}
@@ -1511,7 +1411,6 @@ export default function Home() {
                   setRecipeForm(buildEmptyRecipeForm());
                   setRecipeModalOpen(true);
                 }}
-                onResolveMoreImages={() => void resolveRecipeImagesBatch(pendingRecipeImageIds.slice(0, 4))}
                 onToggleFavorite={toggleFavoriteRecipe}
                 recipeFilter={recipeFilter}
                 recipeTags={recipeTags}
@@ -2616,14 +2515,12 @@ function IngredientsView({
 }
 
 function RecipesView({
-  imageBatchFeedback,
   difficultyFilter,
   filteredRecipes,
   loading,
   onDeleteRecipe,
   onOpenRecipe,
   onOpenCreateRecipe,
-  onResolveMoreImages,
   onToggleFavorite,
   recipeFilter,
   recipeTags,
@@ -2635,14 +2532,12 @@ function RecipesView({
   timeFilter,
   totalRecipes,
 }: {
-  imageBatchFeedback: RecipeImageBatchFeedback;
   difficultyFilter: string;
   filteredRecipes: Recipe[];
   loading: boolean;
   onDeleteRecipe: (recipeId: string) => void;
   onOpenRecipe: (recipe: Recipe) => void;
   onOpenCreateRecipe: () => void;
-  onResolveMoreImages: () => void;
   onToggleFavorite: (recipe: Recipe, event?: { stopPropagation: () => void }) => void;
   recipeFilter: string;
   recipeTags: string[];
@@ -2667,6 +2562,9 @@ function RecipesView({
             <h2 className="text-2xl font-semibold">Recetas guardadas</h2>
             <p className="text-sm text-ink/70">
               {filteredRecipes.length} de {totalRecipes} recetas disponibles
+            </p>
+            <p className="text-xs leading-5 text-ink/55">
+              Las imagenes reales se resuelven bajo demanda al abrir una receta o desde su ficha. La grid no lanza busquedas automaticas para no gastar cuota de Gemini.
             </p>
           </div>
           <button className="rounded-lg bg-leaf px-4 py-3 font-semibold text-white disabled:opacity-60" disabled={loading} onClick={onOpenCreateRecipe} type="button">
@@ -2792,63 +2690,6 @@ function RecipesView({
           </div>
         ) : null}
       </div>
-
-      {imageBatchFeedback.phase !== "idle" ? (
-        <div
-          className={`rounded-lg border p-4 shadow-soft ${
-            imageBatchFeedback.phase === "loading"
-              ? "border-leaf/25 bg-white"
-              : imageBatchFeedback.phase === "success"
-                ? "border-leaf/30 bg-mint/30"
-                : imageBatchFeedback.phase === "rate_limited"
-                  ? "border-yolk/40 bg-yolk/10"
-                  : "border-tomato/30 bg-tomato/5"
-          }`}
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-3">
-              {imageBatchFeedback.phase === "loading" ? (
-                <span className="mt-1 inline-flex h-4 w-4 animate-spin rounded-full border-2 border-leaf/25 border-t-leaf" aria-hidden="true" />
-              ) : (
-                <span
-                  className={`mt-1 inline-flex h-4 w-4 rounded-full ${
-                    imageBatchFeedback.phase === "success"
-                      ? "bg-leaf"
-                      : imageBatchFeedback.phase === "rate_limited"
-                        ? "bg-yolk"
-                        : "bg-tomato"
-                  }`}
-                  aria-hidden="true"
-                />
-              )}
-              <div>
-                <p className="font-semibold text-ink">
-                  {imageBatchFeedback.phase === "loading"
-                    ? "Generando imagenes para recetas nuevas..."
-                    : imageBatchFeedback.phase === "rate_limited"
-                      ? imageBatchFeedback.cooldownSeconds
-                        ? `Resolucion pausada. Reintento disponible en ${imageBatchFeedback.cooldownSeconds}s`
-                        : "Resolucion pausada temporalmente"
-                      : imageBatchFeedback.phase === "success"
-                        ? "Imagenes actualizadas"
-                        : "No se pudieron actualizar las imagenes"}
-                </p>
-                <p className="mt-1 text-sm leading-6 text-ink/75">{imageBatchFeedback.message}</p>
-              </div>
-            </div>
-            {imageBatchFeedback.phase !== "loading" && imageBatchFeedback.remainingCount > 0 ? (
-              <button
-                className="rounded-lg border border-leaf px-3 py-2 text-sm font-semibold text-leaf disabled:opacity-60"
-                disabled={loading || imageBatchFeedback.phase === "rate_limited"}
-                onClick={onResolveMoreImages}
-                type="button"
-              >
-                Resolver mas
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
 
       {filteredRecipes.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line bg-white p-8 text-ink/75 shadow-soft">

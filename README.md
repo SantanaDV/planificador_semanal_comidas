@@ -26,6 +26,7 @@ La entrega final prioriza por tanto la version mas estable y defendible del prod
 - Recetario con filtro, eliminacion, favoritas y creacion manual de recetas.
 - Detalle editable de receta con foto, ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
 - Resolucion bajo demanda de imagen real para recetas, con validacion minima de `image_url`, fuente y estado de busqueda.
+- La vista `Recetas` no dispara busquedas masivas de imagen al cargar; la resolucion se hace al abrir el detalle o al pedirla manualmente.
 - Explicacion breve de por que se eligio cada plato.
 - Estado vacio de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
 - Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
@@ -550,7 +551,7 @@ Fue necesario separar la resolucion de imagenes de la generacion semanal: con `g
 Cambió el problema desde “que Gemini adivine la URL final” a un flujo mucho mas estable: Gemini encuentra la pagina y el backend valida la imagen real.
 
 **Qué se ajustó después:**
-Se añadió persistencia de `image_lookup_attempted_at` y `image_lookup_retry_after`, junto con resolucion en lote pequeña al entrar en Recetas y reintento manual en el detalle.
+Se añadieron `image_lookup_attempted_at` y `image_lookup_retry_after`, pero se elimino la resolucion automatica en la grid de Recetas. Para proteger cuota de Gemini, la busqueda queda reservada al detalle de receta y a acciones explicitas bajo demanda.
 
 ---
 
@@ -619,6 +620,23 @@ Permitió comprobar con datos reales que el desacoplamiento arquitectonico era c
 
 **Qué se ajustó después:**
 La decision final fue no mezclar ese experimento con la entrega principal. La rama `main` se mantiene en la via mas estable y el experimento local con Ollama queda preservado en `experiment/local-ollama-menu` para retomarlo mas adelante.
+
+---
+
+## 14. Control de cuota para resolucion de imagenes
+
+**Herramienta:** Codex / Gemini
+**Objetivo:** Evitar que la vista de recetas consuma cuota de Gemini de forma agresiva al cargar listados.
+
+**Prompt usado:**
+
+> Revisa si la vista de recetas esta disparando busquedas de imagen al cargar y rediseña el flujo para que la resolucion se haga solo bajo demanda, con cache, cooldown y sin concurrencia agresiva.
+
+**Por qué funcionó:**
+Forzo una politica mas realista para el MVP: las imagenes enriquecen el producto, pero no deben competir con la generacion de menus por cuota ni lanzar tormentas de llamadas al entrar en `Recetas`.
+
+**Qué se ajustó después:**
+La grid dejo de disparar resolucion automatica y el backend ya no reintenta durante una ventana activa de `retry_after`, incluso si el usuario pulsa reintentar demasiado pronto.
 
 
 # Estructura del video y presentación
