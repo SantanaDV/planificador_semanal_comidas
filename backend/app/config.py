@@ -6,8 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./local.db"
     cors_origins: str = "http://localhost:3000"
-    text_ai_provider: str = "gemini"
+    text_ai_provider: str = "ollama"
     image_ai_provider: str = "gemini"
+    local_text_base_url: str = "http://localhost:11434"
+    local_text_model: str = "qwen2.5:1.5b"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash-lite"
     gemini_enable_google_search: bool = True

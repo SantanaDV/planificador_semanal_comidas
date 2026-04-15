@@ -16,6 +16,7 @@ from .database import Base, engine, get_session
 from .demo_data import DEFAULT_INGREDIENT_CATEGORIES, DEMO_INGREDIENTS
 from .logging_service import record_exception, record_log
 from .models import Ingredient, IngredientCategory, MenuItem, Recipe, SystemLog, User, WeeklyMenu
+from .providers.text import TextProviderError
 from .schemas import (
     AiStatusOut,
     GenerateMenuRequest,
@@ -506,6 +507,25 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
     )
     try:
         generated = text_generation_service.generate_weekly_menu(ingredients, generation_context)
+    except TextProviderError as exc:
+        status_code, detail = _text_provider_error_response(exc)
+        record_log(
+            "warning",
+            "menu_planning",
+            "El proveedor de texto no pudo completar la generacion semanal",
+            {
+                "ingredient_count": len(all_ingredients),
+                "usable_ingredient_count": len(ingredients),
+                "excluded_ingredient_count": len(payload.excluded_ingredient_ids),
+                "compatible_recipe_count": len(compatible_recipe_titles),
+                "favorite_recipe_count": len(favorite_recipe_titles),
+                "provider": text_generation_service.provider_name,
+                "model": text_generation_service.model_name,
+                "error_type": exc.error_type,
+                **exc.context,
+            },
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     except WeeklyMenuResolutionError as exc:
         error_type = str(exc.context.get("error_type") or "").strip()
         cooldown_seconds = exc.context.get("cooldown_seconds")
@@ -680,6 +700,23 @@ def replace_menu_item(
             item.day_index,
             item.meal_type,
         )
+    except TextProviderError as exc:
+        status_code, detail = _text_provider_error_response(exc)
+        record_log(
+            "warning",
+            "menu_planning",
+            "El proveedor de texto no pudo generar una sustitucion",
+            {
+                "menu_id": menu_id,
+                "item_id": item_id,
+                "meal_type": item.meal_type,
+                "provider": text_generation_service.provider_name,
+                "model": text_generation_service.model_name,
+                "error_type": exc.error_type,
+                **exc.context,
+            },
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     except Exception as exc:
         record_exception(
             "menu_planning",
@@ -1016,6 +1053,24 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
         "is_favorite": recipe.is_favorite,
         "created_at": recipe.created_at,
     }
+
+
+def _text_provider_error_response(exc: TextProviderError) -> tuple[int, str]:
+    error_type = (exc.error_type or "").strip()
+    if error_type in {"provider_unavailable", "provider_timeout"}:
+        return (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "El proveedor local de texto no esta disponible o ha tardado demasiado en responder. Comprueba Ollama y vuelve a intentarlo.",
+        )
+    if error_type in {"provider_http_error", "provider_invalid_response", "provider_empty_response"}:
+        return (
+            status.HTTP_502_BAD_GATEWAY,
+            "El proveedor local de texto devolvio una respuesta no valida para completar la operacion.",
+        )
+    return (
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "No se pudo completar la operacion con el proveedor local de texto.",
+    )
 
 
 def _normalize_recipe_image_fields(value: Any) -> dict[str, Any]:

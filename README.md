@@ -1,6 +1,6 @@
 # Planificador semanal de comidas con IA
 
-Aplicacion web para crear menus semanales a partir de ingredientes disponibles, preferencias e historial de recetas. El MVP usa Next.js, FastAPI, PostgreSQL, Docker Compose y Gemini configurable. Para probar IA real necesitas tu propia clave de Gemini; si no la configuras, el backend usa un fallback local para que la demo siga funcionando.
+Aplicacion web para crear menus semanales a partir de ingredientes disponibles, preferencias e historial de recetas. El MVP usa Next.js, FastAPI, PostgreSQL y Docker Compose. La generacion textual del menu ya esta preparada para usar un proveedor local de texto via Ollama, mientras que Gemini queda reservado para la resolucion opcional de imagenes de recetas.
 
 ## Entregables de la prueba
 
@@ -30,11 +30,12 @@ Aplicacion web para crear menus semanales a partir de ingredientes disponibles, 
 - Integracion WSL activada si se ejecuta desde WSL en Windows.
 - Node.js 20.9+ si ejecutas el frontend sin Docker.
 - Python 3.12 si ejecutas el backend sin Docker.
-- Clave de Gemini API para probar generacion real con `gemini-2.5-flash-lite`.
+- Ollama levantado localmente si quieres probar la generacion textual real en esta fase.
+- Clave de Gemini API solo si quieres probar la resolucion de imagenes reales.
 
 ## Arranque rapido con Docker
 
-Este es el flujo recomendado para levantar el proyecto y comprobar que la integracion con Gemini esta bien configurada.
+Este es el flujo recomendado para levantar el proyecto y dejar preparada la configuracion local. En esta fase, `docker-compose` sigue levantando frontend, backend y base de datos, pero el servicio de Ollama todavia no se integra dentro del propio Compose.
 
 ### 1. Preparar variables de entorno
 
@@ -50,7 +51,18 @@ Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-### 2. Crear una clave Gemini API en Google AI Studio
+### 2. Preparar Ollama local para la generacion textual
+
+Ejemplo de arranque fuera de Docker Compose:
+
+```bash
+ollama serve
+ollama pull qwen2.5:1.5b
+```
+
+Si no tienes `ollama` instalado todavia, consulta la documentacion oficial: https://docs.ollama.com/
+
+### 3. Crear una clave Gemini API en Google AI Studio
 
 Paso a paso contrastado con la documentacion oficial de Google AI for Developers:
 
@@ -73,19 +85,23 @@ Casos reales a tener en cuenta:
 - Si no tienes permisos sobre un proyecto corporativo u organizacional, la salida mas simple para esta prueba es crear o usar un proyecto personal que controles.
 - Google AI Studio muestra y gestiona las claves desde su propia pagina de `API Keys`, pero para administracion avanzada o restricciones puedes ir despues a Google Cloud Console.
 
-### 3. Pegar la clave en `.env`
+### 4. Configurar `.env`
 
 Abre `.env` y deja, como minimo:
 
 ```bash
+TEXT_AI_PROVIDER=ollama
+IMAGE_AI_PROVIDER=gemini
+LOCAL_TEXT_BASE_URL=http://localhost:11434
+LOCAL_TEXT_MODEL=qwen2.5:1.5b
 GEMINI_API_KEY=tu_clave_real_aqui
 GEMINI_MODEL=gemini-2.5-flash-lite
 GEMINI_ENABLE_GOOGLE_SEARCH=true
 ```
 
-No subas `.env` al repositorio. La clave se usa solo en el backend mediante la variable `GEMINI_API_KEY`; el frontend no la recibe.
+No subas `.env` al repositorio. La clave Gemini se usa solo en el backend y unicamente para imagenes; el frontend no la recibe.
 
-### 4. Levantar la aplicacion
+### 5. Levantar la aplicacion
 
 ```bash
 docker compose up --build
@@ -99,7 +115,7 @@ Docker arranca:
 
 El frontend se ejecuta con `next start` sobre una build de produccion. Si quieres recarga en caliente, usa la ejecucion sin Docker.
 
-### 5. Verificar que todo ha arrancado
+### 6. Verificar que todo ha arrancado
 
 ```bash
 curl http://localhost:8000/health
@@ -111,42 +127,50 @@ Respuesta esperada:
 {"status":"ok"}
 ```
 
-### 6. Verificar si Gemini ha quedado configurado
+### 7. Verificar el proveedor de texto configurado
 
 ```bash
 curl http://localhost:8000/ai/status
 ```
 
-Si la clave esta bien cargada, deberias ver algo parecido a:
+Si la configuracion esta bien cargada, deberias ver algo parecido a:
 
 ```json
 {
-  "provider": "gemini",
-  "model": "gemini-2.5-flash-lite",
+  "provider": "ollama",
+  "model": "qwen2.5:1.5b",
   "configured": true,
   "mode": "ai"
 }
 ```
 
-Si `configured` sale `false`, revisa:
+Si `configured` sale `false`, o la generacion devuelve error, revisa:
 
-- que la clave esta realmente escrita en `.env`
+- que `TEXT_AI_PROVIDER=ollama`
+- que `LOCAL_TEXT_BASE_URL` apunta a un Ollama real
+- que `LOCAL_TEXT_MODEL` existe ya en tu instancia de Ollama
 - que has levantado Docker despues de editar `.env`
-- que no hay espacios o comillas sobrantes en `GEMINI_API_KEY`
+- que tu equipo tiene recursos suficientes para ejecutar el modelo local en CPU
 
-### 7. Abrir la app
+### 8. Abrir la app
 
 - Frontend: http://localhost:3000
 - API docs: http://localhost:8000/docs
 - Healthcheck: http://localhost:8000/health
 
-### 8. Comprobar el flujo real
+### 9. Comprobar el flujo real
 
 1. Entra en `Ingredientes`.
 2. Si no quieres cargar ingredientes a mano, usa el flujo de ingredientes de prueba desde la UI cuando el generador te lo ofrezca.
 3. Pulsa `Generar menu semanal`.
-4. Si Gemini esta bien configurado y con cuota disponible, el backend intentara generar el menu con IA real.
-5. Si no hay clave valida, la app te avisara antes y podras continuar con modo demo local.
+4. Si Ollama esta levantado y responde en `LOCAL_TEXT_BASE_URL`, el backend intentara generar el menu con IA local.
+5. Si Gemini esta configurado, la app podra enriquecer imagenes de recetas bajo demanda, pero eso no afecta a la generacion principal del menu.
+
+Nota practica de esta fase:
+
+- `qwen2.5:1.5b` es el mejor equilibrio encontrado hasta ahora entre calidad y peso en local.
+- En CPU, la generacion semanal puede seguir siendo lenta y devolver un error claro si Ollama no responde a tiempo o no cierra un menu valido.
+- Las sustituciones puntuales responden mejor que la generacion semanal completa.
 
 ## Creacion de la clave Gemini API: resumen corto
 
@@ -160,7 +184,7 @@ Si solo quieres el minimo imprescindible:
 6. Reinicia `docker compose up --build`
 7. Comprueba `curl http://localhost:8000/ai/status`
 
-Sin una `GEMINI_API_KEY` valida, el menu se genera con fallback local controlado. Esto es intencional para que la entrega sea ejecutable aunque no haya cuota o conexion con Gemini, pero para evaluar la integracion IA real configura tu propia clave. Si no hay ingredientes en la nevera, la app no genera un menu con datos inventados: muestra un estado vacio y permite cargar ingredientes de prueba en PostgreSQL desde la UI.
+Sin una `GEMINI_API_KEY` valida, la app sigue funcionando para la parte critica del menu si Ollama esta disponible; lo que se pierde es la resolucion real de imagenes. Si no hay ingredientes en la nevera, la app no genera un menu con datos inventados: muestra un estado vacio y permite cargar ingredientes de prueba en PostgreSQL desde la UI.
 
 ## Ejecucion local sin Docker
 
@@ -192,7 +216,11 @@ npm run dev
 
 | Variable                        | Uso                                                                      | Valor por defecto            |
 | ------------------------------- | ------------------------------------------------------------------------ | ---------------------------- |
-| `GEMINI_API_KEY`              | Clave local de Gemini API. Si falta, se usa fallback local.              | vacio                        |
+| `TEXT_AI_PROVIDER`            | Proveedor principal de texto (`ollama`, `gemini`, `deterministic`).      | `ollama`                     |
+| `IMAGE_AI_PROVIDER`           | Proveedor de resolucion de imagenes.                                     | `gemini`                     |
+| `LOCAL_TEXT_BASE_URL`         | URL base del proveedor local de texto.                                   | `http://localhost:11434`     |
+| `LOCAL_TEXT_MODEL`            | Modelo local usado para menu y sustituciones.                            | `qwen2.5:1.5b`               |
+| `GEMINI_API_KEY`              | Clave local de Gemini API para imagenes bajo demanda.                    | vacio                        |
 | `GEMINI_MODEL`                | Modelo usado para `generateContent`.                                   | `gemini-2.5-flash-lite`    |
 | `GEMINI_ENABLE_GOOGLE_SEARCH` | Activa la busqueda web de Gemini para intentar resolver imagenes reales. | `true`                     |
 | `DATABASE_URL`                | Conexion SQLAlchemy del backend.                                         | SQLite local fuera de Docker |
@@ -613,6 +641,57 @@ Permitio preparar la arquitectura para introducir un proveedor local de texto en
 
 **Qué se ajustó después:**
 La configuracion pasa a distinguir `text_ai_provider` e `image_ai_provider`; Gemini sigue igual para imagenes y el texto mantiene el comportamiento actual hasta enchufar el proveedor local.
+
+---
+
+## 14. Proveedor local de texto con Ollama
+
+**Herramienta:** Codex / Ollama
+**Objetivo:** Sustituir a Gemini como proveedor principal de texto sin tocar todavia la capa de imagenes ni romper la API publica.
+
+**Prompt usado:**
+
+> Ejecuta la Fase 2: implementa `LocalOllamaTextProvider`, conecta `TextGenerationService` a un proveedor local por HTTP, manten la API publica estable, deja Gemini solo para imagenes y valida el flujo real con un modelo pequeno y razonable para esta prueba.
+
+**Por qué funcionó:**
+Permitio mover la responsabilidad critica del menu y las sustituciones a una interfaz local de texto reutilizando la validacion y las reglas de negocio existentes.
+
+**Qué se ajustó después:**
+Se probaron `qwen2.5:3b` y `qwen2.5:1.5b` en CPU. `3b` agotaba timeout con demasiada facilidad, asi que se dejo `qwen2.5:1.5b` como opcion por defecto. Para reducir latencia y mantener compatibilidad con la validacion actual, Ollama genera un JSON compacto y el backend completa el resto de campos mediante su normalizacion existente.
+
+---
+
+## 15. Estabilizacion del menu semanal local en CPU
+
+**Herramienta:** Codex / Ollama
+**Objetivo:** Reducir la fragilidad del menu semanal con un modelo local pequeno en CPU sin cambiar la API publica ni la logica de imagenes.
+
+**Prompt usado:**
+
+> Analiza por que el menu semanal local sigue siendo inestable con Ollama en CPU y aplica el cambio minimo mas defendible para esta prueba. Prioriza estabilidad real del menu semanal, manteniendo la API intacta y sin tocar todavia Docker Compose ni la capa de imagenes.
+
+**Por qué funcionó:**
+Obligo a dejar de tratar el menu semanal como una sola respuesta perfecta y a mover la estrategia hacia bloques adaptativos, con validacion por slot y recuperacion progresiva cuando el modelo no cierra bien el contexto.
+
+**Qué se ajustó después:**
+La generacion semanal local paso a usar bloques grandes por tipo de comida, con particion recursiva solo cuando un bloque falla, `num_predict` adaptativo y un formato delimitado por lineas para los bloques semanales en lugar de JSON anidado. El objetivo fue reducir errores de parsing y llamadas innecesarias cuando el modelo ya habia demostrado que un bloque completo no era fiable.
+
+---
+
+## 16. Intento final con weekly slot-first
+
+**Herramienta:** Codex / Ollama
+**Objetivo:** Confirmar si una estrategia de menu semanal basada directamente en generacion por slot era suficiente para cerrar el weekly local como camino principal del producto.
+
+**Prompt usado:**
+
+> Haz un ultimo intento acotado: convierte el weekly local a una estrategia slot-first reutilizando la ruta de sustitucion, valida de forma honesta y termina con una conclusion binaria sobre si compensa seguir o no para esta entrega.
+
+**Por qué funcionó:**
+Permitio aislar la pregunta correcta: no si la arquitectura ya estaba desacoplada, sino si el weekly local completo era realmente defendible en tiempo y estabilidad con `qwen2.5:1.5b` en CPU.
+
+**Qué se ajustó después:**
+La prueba final confirmo que el slot-first puro sigue tardando demasiado y no cierra el weekly con suficiente fiabilidad para esta entrega. La conclusion fue no seguir empujando esta via como camino principal sin cambiar el marco tecnico o el modelo.
 
 
 # Estructura del video y presentación
