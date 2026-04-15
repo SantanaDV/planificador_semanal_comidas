@@ -25,8 +25,8 @@ La entrega final prioriza por tanto la version mas estable y defendible del prod
 - Repeticion de recetas guardadas en un hueco del menu.
 - Recetario con filtro, eliminacion, favoritas y creacion manual de recetas.
 - Detalle editable de receta con foto, ingredientes, cantidades, pasos, dificultad, raciones y etiquetas.
-- Resolucion bajo demanda de imagen real para recetas, con validacion minima de `image_url`, fuente y estado de busqueda.
-- La vista `Recetas` no dispara busquedas masivas de imagen al cargar; la resolucion se hace al abrir el detalle o al pedirla manualmente.
+- Resolucion progresiva de imagen real para recetas, con validacion minima de `image_url`, fuente, candidatos cacheados y estado de busqueda.
+- La vista `Recetas` puede completar algunas imagenes automaticamente, pero solo sobre un pequeno lote de recetas visibles y con una cola controlada.
 - Explicacion breve de por que se eligio cada plato.
 - Estado vacio de ingredientes y carga de ingredientes de prueba bajo demanda en base de datos.
 - Logging transversal en base de datos para eventos de backend, frontend, IA y planificacion.
@@ -87,7 +87,6 @@ Abre `.env` y deja, como minimo:
 ```bash
 GEMINI_API_KEY=tu_clave_real_aqui
 GEMINI_MODEL=gemini-2.5-flash-lite
-GEMINI_ENABLE_GOOGLE_SEARCH=true
 ```
 
 No subas `.env` al repositorio. La clave se usa solo en el backend mediante la variable `GEMINI_API_KEY`; el frontend no la recibe.
@@ -131,7 +130,9 @@ Si la clave esta bien cargada, deberias ver algo parecido a:
   "provider": "gemini",
   "model": "gemini-2.5-flash-lite",
   "configured": true,
-  "mode": "ai"
+  "mode": "ai",
+  "image_provider": "http-search",
+  "images_enabled": true
 }
 ```
 
@@ -201,7 +202,6 @@ npm run dev
 | ------------------------------- | ------------------------------------------------------------------------ | ---------------------------- |
 | `GEMINI_API_KEY`              | Clave local de Gemini API. Si falta, se usa fallback local.              | vacio                        |
 | `GEMINI_MODEL`                | Modelo usado para `generateContent`.                                   | `gemini-2.5-flash-lite`    |
-| `GEMINI_ENABLE_GOOGLE_SEARCH` | Activa la busqueda web de Gemini para intentar resolver imagenes reales. | `true`                     |
 | `DATABASE_URL`                | Conexion SQLAlchemy del backend.                                         | SQLite local fuera de Docker |
 | `NEXT_PUBLIC_API_URL`         | URL de la API para el navegador.                                         | `http://localhost:8000`    |
 
@@ -259,14 +259,19 @@ curl "http://localhost:8000/logs?module=ai&limit=20"
 - Al pulsar "Anadir ingredientes de prueba" en ese aviso, el frontend llama a `POST /ingredients/demo` y el backend guarda esos ingredientes en la base de datos.
 - La generacion de menus exige al menos 5 ingredientes reales guardados, ya sean introducidos manualmente o cargados mediante el endpoint demo.
 - Los ingredientes excluidos se seleccionan desde los ingredientes existentes en la nevera. Si tras aplicar exclusiones quedan menos de 5 ingredientes disponibles, la app avisa antes de llamar a Gemini o al fallback.
+- Antes de llamar a Gemini, el backend hace una prevalidacion contextual de viabilidad: cruza dieta, restricciones, ingredientes excluidos, recetas guardadas compatibles y nivel de variedad para detectar cuando ya no queda una base minima razonable. En esos casos devuelve un `400` accionable y no gasta cuota en una llamada condenada a fallar.
 - El backend pasa como contexto recetas guardadas compatibles y prioriza las favoritas compatibles sin forzarlas si no encajan.
-- La generacion semanal prioriza estabilidad: Gemini construye el menu y las recetas sin intentar resolver imagenes para los 14 platos en la misma llamada.
-- La resolucion de imagenes reales se hace bajo demanda al entrar en Recetas para un lote pequeno de recetas nuevas y tambien desde el detalle de receta cuando hace falta reintentar.
-- Con `gemini-2.5-flash-lite`, el uso de tools no se puede combinar con `responseMimeType=application/json`, asi que el backend usa JSON estricto para la generacion del menu y parseo controlado por prompt en la resolucion de imagen.
-- La IA prioriza `image_source_url` como pagina fuente del plato. El backend intenta extraer una imagen real desde metadatos estandar de esa pagina (`og:image`, `twitter:image`, JSON-LD/schema.org `) y solo usa `image_url` directa si pasa validacion.
-- El backend valida la URL de imagen con una comprobacion HTTP minima y degrada a `image_url = null` cualquier valor sospechoso, no accesible o que no responda como imagen real.
-- Los estados de resolucion distinguen entre `found`, `invalid`, `not_found`, `rate_limited` y `upstream_error`.
-- Si la IA no encuentra una imagen fiable, la receta sigue siendo valida y el frontend muestra un placeholder limpio con opcion de reintento.
+- Las restricciones de dieta como `Vegetariano` y `Vegano` se tratan como reglas duras en backend: una receta con carne, pescado o marisco no puede sobrevivir al menu final aunque el modelo la devuelva.
+- La generacion semanal prioriza estabilidad: Gemini queda reservado al flujo principal del menu semanal.
+- La resolucion de imagenes ya no usa Gemini. Se hace por busqueda HTTP basada en el nombre de la receta.
+- La vista `Recetas` puede auto-resolver de forma progresiva un pequeno lote de recetas visibles sin imagen, con concurrencia baja y sin tormentas de llamadas.
+- El backend busca paginas candidatas del plato, extrae imagenes desde metadatos estandar (`og:image`, `twitter:image`, JSON-LD/schema.org) y valida por HTTP la imagen final.
+- Los candidatos de imagen se cachean por receta. El boton de reintento rota entre candidatos ya encontrados y no repite la busqueda completa en cada clic.
+- Si una receta tiene varias alternativas cacheadas, el usuario puede recorrerlas todas. La UI muestra la posicion actual (`Alternativa X de Y`), permite avanzar al siguiente candidato sin lanzar una nueva busqueda y, al llegar al ultimo, ofrece dejar la receta sin foto.
+- La validacion de imagen prioriza utilidad visual sobre coincidencia exacta ingrediente a ingrediente: acepta imagenes razonables del mismo tipo de plato aunque tengan extras secundarios, y solo descarta resultados claramente irrelevantes como logos, iconos o placeholders.
+- Para recetas simples o genericas, la busqueda de imagen usa tambien familias visuales y variantes naturales del plato (`ensalada`, `bowl`, `parfait`, `copa de yogur con frutas`, `postre de yogur`, `tostada`) en lugar de depender solo del titulo exacto.
+- Los estados de resolucion distinguen entre `pending`, `found`, `invalid`, `not_found`, `attempts_exhausted` y `upstream_error`.
+- Tras agotar las alternativas disponibles, la receta mantiene placeholder y deja de insistir automaticamente.
 - El fallback local vive separado en `backend/app/demo_fallback.py` y solo se usa cuando Gemini no esta configurado o cuando la llamada externa falla.
 - Si hay suficientes ingredientes pero no hay clave valida de Gemini, la app avisa antes de generar y permite continuar con modo demo local.
 
@@ -302,7 +307,7 @@ curl "http://localhost:8000/logs?module=frontend&limit=20"
 6. Sustituye un plato para mostrar el flujo de regeneracion.
 7. Repite una receta guardada desde el selector.
 8. Filtra el recetario, abre una tarjeta, crea una receta manual, marca una favorita y edita raciones, dificultad, foto, ingredientes o pasos.
-9. Entra en Recetas para que la app intente resolver imagenes de nuevas recetas en segundo plano. Si una sigue sin foto, abre su detalle y reintenta desde ahi sin bloquear la generacion semanal.
+9. Entra en Recetas y deja que la grid complete algunas imagenes de forma progresiva. Abre el detalle de una receta si quieres forzar manualmente la siguiente alternativa cacheada sin bloquear la generacion semanal.
 
 ## Referencias oficiales usadas para esta configuracion
 
@@ -521,37 +526,37 @@ El backend prioriza favoritas compatibles en el prompt/fallback, pero sigue perm
 
 ---
 
-## 8. Metadatos visuales generados por IA
+## 8. Reservar Gemini para el flujo principal del menu
 
 **Herramienta:** Codex / Gemini
-**Objetivo:** Hacer que Gemini intente resolver una imagen real de la receta usando busqueda web, sin inventar URLs.
+**Objetivo:** Reducir consumo de cuota y dejar Gemini solo para la generacion semanal del menu.
 
 **Prompt usado:**
 
-> Modifica la generacion para que Gemini use busqueda web y devuelva `image_url` real, `image_source_url`, `image_alt_text`, `image_lookup_status` e `image_lookup_reason`, dejando `image_url` en null cuando no pueda verificar una imagen fiable.
+> Quiero cambiar la estrategia del proyecto para hacer un uso mucho mas eficiente de Gemini: Gemini debe quedar reservado solo para la generacion de menus semanales y la resolucion de imagenes debe salir de Gemini por completo.
 
 **Por qué funcionó:**
-Permite que la propia llamada a Gemini intente resolver una imagen real del plato y que el backend solo persista lo que pasa una validacion minima.
+Obligo a separar claramente lo critico del producto de lo accesorio: el presupuesto de Gemini se reserva al menu semanal y las imagenes dejan de competir por cuota.
 
 **Qué se ajustó después:**
-Fue necesario separar la resolucion de imagenes de la generacion semanal: con `gemini-2.5-flash-lite`, buscar 14 recetas con imagen en la misma llamada elevaba el riesgo de `ReadTimeout`, asi que el menu se genera primero y la imagen se resuelve bajo demanda en el detalle.
+La UI de menu paso a comunicar mejor los estados de saturacion, cooldown y error temporal de Gemini, mientras que el recetario dejo de lanzar resoluciones automáticas al cargar.
 
 ---
 
-## 9. Resolucion de imagenes desde pagina fuente
+## 9. Resolucion de imagenes por busqueda HTTP y candidatos cacheados
 
-**Herramienta:** Codex / Gemini
-**Objetivo:** Dejar de depender de una `image_url` directa sugerida por Gemini y pasar a un flujo mas robusto basado en pagina fuente.
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Sacar las imagenes fuera de Gemini y convertirlas en un flujo secundario, barato y controlado.
 
 **Prompt usado:**
 
-> Quiero la solucion arquitectonica y funcional mas robusta para la resolucion de imagenes en este MVP. Gemini debe ayudar a encontrar la pagina fuente del plato (`image_source_url`) y el backend debe extraer la imagen real desde metadatos estandar (`og:image`, `twitter:image`, `schema.org image`). La resolucion debe seguir siendo bajo demanda, no parte obligatoria de la generacion semanal, y debe distinguir entre `found`, `invalid`, `not_found`, `rate_limited` y `upstream_error`.
+> La resolucion de imagenes ya no debe usar Gemini. Dada una receta, usa el nombre del plato para buscar candidatos por HTTP, valida una lista corta, persiste esos candidatos y haz que el boton de reintento avance entre alternativas ya encontradas en lugar de lanzar una nueva busqueda completa.
 
 **Por qué funcionó:**
-Cambió el problema desde “que Gemini adivine la URL final” a un flujo mucho mas estable: Gemini encuentra la pagina y el backend valida la imagen real.
+Movio la complejidad a un flujo mucho mas predecible: se buscan paginas por HTTP, se extraen imagenes desde metadatos estandar y se reutilizan candidatos ya validados sin gastar cuota de Gemini.
 
 **Qué se ajustó después:**
-Se añadieron `image_lookup_attempted_at` y `image_lookup_retry_after`, pero se elimino la resolucion automatica en la grid de Recetas. Para proteger cuota de Gemini, la busqueda queda reservada al detalle de receta y a acciones explicitas bajo demanda.
+Se limito el numero de alternativas visibles por receta y se introdujo el estado `attempts_exhausted` para dejar de insistir cuando ya no compensa seguir buscando.
 
 ---
 
@@ -592,17 +597,17 @@ La grid de recetas se limpió visualmente para quitar badges tecnicos de la supe
 ## 12. Correccion del flujo de reintento de imagen
 
 **Herramienta:** Codex / Antigravity
-**Objetivo:** Eliminar glitches visuales y reintentos duplicados cuando Gemini se satura durante la resolucion de imagenes.
+**Objetivo:** Eliminar glitches visuales y convertir el reintento de imagen en una rotacion limpia entre candidatos ya encontrados.
 
 **Prompt usado:**
 
-> Revisa el flujo de reintento de imagen en el detalle de receta cuando Gemini devuelve `rate_limited` o `upstream_error`. Quiero una maquina de estados clara, sin mezclar “Buscando...” con errores viejos, con boton deshabilitado durante la espera y sin duplicar llamadas por re-render o cambios de estado en React.
+> Revisa el flujo de reintento de imagen en el detalle de receta. Quiero una maquina de estados clara, sin mezclar “Buscando...” con errores viejos, con boton deshabilitado durante la espera y haciendo que cada reintento avance a la siguiente alternativa cacheada en vez de repetir la busqueda completa.
 
 **Por qué funcionó:**
-Obligó a separar correctamente el estado de carga del estado previo, a respetar `retry_after` y a poner una guarda local por `recipe_id` para evitar tormentas de peticiones en el frontend.
+Obligó a separar correctamente el estado de carga del estado previo, a evitar llamadas duplicadas y a convertir el reintento en un flujo determinista y mucho menos costoso.
 
 **Qué se ajustó después:**
-El copy de la UI se hizo más específico: ahora habla de “resolucion de imagenes” y de saturacion de Gemini, en lugar de mostrar un error genérico que parecía romper la receta completa.
+La UI paso a distinguir mejor entre `pending`, `invalid`, `not_found`, `upstream_error` y `attempts_exhausted`, con copy especifico para resolucion de imagen por HTTP.
 
 ---
 
@@ -623,20 +628,105 @@ La decision final fue no mezclar ese experimento con la entrega principal. La ra
 
 ---
 
-## 14. Control de cuota para resolucion de imagenes
+## 14. Control de cuota y trafico secundario
 
-**Herramienta:** Codex / Gemini
-**Objetivo:** Evitar que la vista de recetas consuma cuota de Gemini de forma agresiva al cargar listados.
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar que la vista de recetas dispare trafico secundario innecesario y reservar Gemini para los menus, sin renunciar a mejorar la grid progresivamente.
 
 **Prompt usado:**
 
-> Revisa si la vista de recetas esta disparando busquedas de imagen al cargar y rediseña el flujo para que la resolucion se haga solo bajo demanda, con cache, cooldown y sin concurrencia agresiva.
+> Revisa si la vista de recetas esta disparando busquedas de imagen al cargar y rediseña el flujo para que la resolucion use una cola progresiva pequena: solo unas pocas recetas visibles, un unico lote en vuelo, candidatos cacheados y sin competir con la generacion del menu semanal.
 
 **Por qué funcionó:**
-Forzo una politica mas realista para el MVP: las imagenes enriquecen el producto, pero no deben competir con la generacion de menus por cuota ni lanzar tormentas de llamadas al entrar en `Recetas`.
+Forzo una politica mas realista para el MVP: las imagenes enriquecen el producto, pero no deben competir con el flujo principal ni lanzar tormentas de llamadas al entrar en `Recetas`.
 
 **Qué se ajustó después:**
-La grid dejo de disparar resolucion automatica y el backend ya no reintenta durante una ventana activa de `retry_after`, incluso si el usuario pulsa reintentar demasiado pronto.
+La grid paso a completar imagenes de forma progresiva y controlada sobre un pequeno conjunto de recetas visibles. Cada lote resuelve pocas recetas, reutiliza candidatos cacheados y deja fuera cualquier reintento automatico cuando una receta ya agotó sus intentos o entro en un estado final.
+
+---
+
+## 15. Restricciones duras de dieta y explicaciones limpias
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar que una dieta vegetariana deje pasar proteinas animales y limpiar el texto explicativo para que suene a producto, no a prompt interno.
+
+**Prompt usado:**
+
+> Quiero que la dieta vegetariana se trate como una restriccion obligatoria en backend y que el campo “Por que este plato” se limpie o regenere si filtra instrucciones internas del sistema.
+
+**Por qué funcionó:**
+Forzó a dejar de confiar solo en el prompt. La validacion semanal ahora invalida carne, pescado y marisco cuando el usuario marca vegetariano, y el campo `explanation` pasa por una capa de saneado para que no mencione reglas, contexto o razonamiento interno.
+
+**Qué se ajustó después:**
+La misma regla dura se aplicó tambien al contexto de recetas guardadas compatibles para no alimentar al modelo con recetas que ya nacen fuera de dieta.
+
+---
+
+## 16. Prevalidacion contextual antes de gastar cuota
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar llamadas inutiles a Gemini cuando las preferencias dejan una base de ingredientes demasiado pobre para construir una semana valida.
+
+**Prompt usado:**
+
+> Antes de llamar a la IA, calcula los ingredientes realmente compatibles con dieta, restricciones, exclusiones y nivel de variedad. Si no queda una base minima viable, no hagas la llamada y devuelve un mensaje claro explicando que faltan ingredientes compatibles o que hace falta relajar alguna preferencia.
+
+**Por qué funcionó:**
+Convirtio un error generico al final del flujo en una decision temprana y explicable. El backend ahora corta antes de gastar cuota cuando la combinacion de filtros deja demasiado poco margen real para construir el menu semanal.
+
+**Qué se ajustó después:**
+La validacion se hizo contextual en lugar de limitarse a la regla fija de “menos de 5 ingredientes”: endurece el umbral si coinciden restricciones de dieta, baja en carbohidratos o variedad alta, y devuelve un mensaje accionable con los factores que estan bloqueando la generacion.
+
+---
+
+## 17. Seleccion de imagenes mas practica para platos simples
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar que recetas sencillas como ensaladas, bowls o salteados se queden sin imagen por una heuristica demasiado literal.
+
+**Prompt usado:**
+
+> Relaja la seleccion de imagenes para aceptar resultados visualmente razonables del mismo tipo de plato aunque tengan algun ingrediente secundario extra. Rechaza solo lo claramente irrelevante.
+
+**Por qué funcionó:**
+Ataco el sitio correcto: no se relajo la validacion HTTP de la imagen, sino la heuristica de recuperacion. Las busquedas pasan a ser menos literales y el descarte por URL deja de bloquear terminos como `banner` que en muchos sitios de recetas corresponden justo a la imagen principal del plato.
+
+**Qué se ajustó después:**
+La estrategia se mantiene conservadora con ruido evidente (`logo`, `icon`, `avatar`, `placeholder`), pero deja de exigir una coincidencia demasiado rigida entre el nombre exacto de la receta y la imagen recuperada.
+
+---
+
+## 18. Busqueda semantica para recetas simples y postres lacteos
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Evitar que recetas genericas como yogur con fruta, ensaladas o bowls se queden sin imagen por depender demasiado del titulo exacto.
+
+**Prompt usado:**
+
+> Para recetas simples o genericas, genera queries mas naturales y semanticas por familia visual del plato: yogur con frutas, copa de yogur, parfait, postre lacteo, ensalada, bowl o tostada. No quiero que la busqueda dependa solo del titulo exacto.
+
+**Por qué funcionó:**
+Corrigio el cuello de botella real: las busquedas por titulo completo eran pobres para platos sencillos. Al introducir familias visuales y variantes naturales, el backend llega a paginas mucho mas utiles sin relajar la validacion HTTP de la imagen.
+
+**Qué se ajustó después:**
+Se mantuvo el descarte de ruido claro (`logo`, `icon`, `avatar`, `placeholder`), pero la recuperacion ya no penaliza recetas como `Yogur con Fruta Fresca y Queso`, donde el queso puede no ser evidente visualmente aunque la imagen represente bien el plato.
+
+---
+
+## 19. Navegacion completa entre candidatos de imagen cacheados
+
+**Herramienta:** Codex / Antigravity
+**Objetivo:** Dejar de cortar artificialmente la exploracion de imagenes en el tercer intento cuando ya existen mas candidatos validos cacheados.
+
+**Prompt usado:**
+
+> Si una receta ya tiene 6 candidatos de imagen validos, no limites la UX a 3 intentos. El usuario debe poder recorrer los 6, ver `Alternativa X de Y`, y al final decidir dejar la receta sin foto sin lanzar nuevas busquedas.
+
+**Por qué funcionó:**
+Separó correctamente dos conceptos que antes estaban mezclados: los intentos de busqueda HTTP y la navegacion entre alternativas ya encontradas. Con eso se evita bloquear un flujo util sin aumentar el trafico externo.
+
+**Qué se ajustó después:**
+El backend ya no consume “intentos” al avanzar por candidatos cacheados, y el detalle de receta pasa de “Probar otra imagen” a “Dejar sin foto” cuando ya se alcanzó la ultima alternativa disponible.
 
 
 # Estructura del video y presentación
