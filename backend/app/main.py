@@ -72,6 +72,10 @@ PANTRY_STRUCTURAL_BASICS = [
 PANTRY_BASICS = [*PANTRY_SUPPORT_BASICS, *PANTRY_STRUCTURAL_BASICS]
 MAX_PANTRY_INGREDIENTS_PER_RECIPE = 3
 MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE = 1
+RICH_FRIDGE_MIN_INGREDIENTS = 12
+RICH_FRIDGE_MIN_CATEGORIES = 4
+MODERATE_FRIDGE_MIN_INGREDIENTS = 8
+MODERATE_FRIDGE_MIN_CATEGORIES = 3
 MAX_RECIPE_IMAGE_ATTEMPTS = 3
 MAX_RECIPE_IMAGE_CANDIDATES = 6
 
@@ -1652,6 +1656,7 @@ def _compatible_saved_recipe_context(
     recent_titles = {normalize_label(title) for title in recent_recipe_titles if title.strip()}
     if not usable_names:
         return []
+    pantry_policy = _contextual_pantry_policy(usable_ingredients)
 
     recipes = session.scalars(
         select(Recipe)
@@ -1689,19 +1694,20 @@ def _compatible_saved_recipe_context(
         structural_pantry_ingredients: list[str] = []
         incompatible = False
         for recipe_name in recipe_ingredient_names:
+            matched_name = next(
+                (usable_name for usable_name in usable_names if _ingredient_name_matches(recipe_name, usable_name)),
+                None,
+            )
+            if matched_name:
+                matched_ingredients.append(matched_name)
+                continue
             if _is_pantry_basic(recipe_name):
                 pantry_ingredients.append(recipe_name)
                 if _is_structural_pantry_basic(recipe_name):
                     structural_pantry_ingredients.append(recipe_name)
                 continue
-            matched_name = next(
-                (usable_name for usable_name in usable_names if _ingredient_name_matches(recipe_name, usable_name)),
-                None,
-            )
-            if not matched_name:
-                incompatible = True
-                break
-            matched_ingredients.append(matched_name)
+            incompatible = True
+            break
 
         if (
             incompatible
@@ -1710,6 +1716,7 @@ def _compatible_saved_recipe_context(
                 fridge_ingredient_count=len(set(matched_ingredients)),
                 pantry_ingredient_count=len(dict.fromkeys(pantry_ingredients)),
                 structural_pantry_count=len(dict.fromkeys(structural_pantry_ingredients)),
+                pantry_policy=pantry_policy,
             )
         ):
             continue
@@ -1802,21 +1809,103 @@ def _recipe_uses_reasonable_pantry_support(
     fridge_ingredient_count: int,
     pantry_ingredient_count: int,
     structural_pantry_count: int,
+    pantry_policy: dict[str, Any] | None = None,
 ) -> bool:
-    """Aplica la política MVP para que la despensa siga siendo apoyo y no base."""
+    """Aplica la política contextual para que la despensa siga siendo apoyo y no base."""
+    pantry_policy = pantry_policy or {}
+    max_pantry_ingredients = int(
+        pantry_policy.get("max_pantry_ingredients_per_recipe") or MAX_PANTRY_INGREDIENTS_PER_RECIPE
+    )
+    max_structural_pantry_ingredients = int(
+        pantry_policy.get("max_structural_pantry_ingredients_per_recipe")
+        or MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE
+    )
+    single_fridge_ingredient_max_pantry = int(pantry_policy.get("single_fridge_ingredient_max_pantry") or 2)
+    single_fridge_ingredient_allows_structural = bool(
+        pantry_policy.get("single_fridge_ingredient_allows_structural_pantry")
+    )
     if fridge_ingredient_count <= 0:
         return False
-    if pantry_ingredient_count > MAX_PANTRY_INGREDIENTS_PER_RECIPE:
+    if pantry_ingredient_count > max_pantry_ingredients:
         return False
     if fridge_ingredient_count > 1 and pantry_ingredient_count > fridge_ingredient_count:
         return False
-    if structural_pantry_count > MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE:
+    if structural_pantry_count > max_structural_pantry_ingredients:
         return False
-    if fridge_ingredient_count == 1 and pantry_ingredient_count > 2:
+    if fridge_ingredient_count == 1 and pantry_ingredient_count > single_fridge_ingredient_max_pantry:
         return False
-    if fridge_ingredient_count == 1 and structural_pantry_count > 0:
+    if fridge_ingredient_count == 1 and structural_pantry_count > 0 and not single_fridge_ingredient_allows_structural:
         return False
     return True
+
+
+def _contextual_pantry_policy(
+    usable_ingredients: list[dict[str, str | None]],
+) -> dict[str, Any]:
+    """Ajusta la tolerancia de despensa al tamaño real de la nevera.
+
+    Cuanta más variedad útil haya, menos sentido tiene completar platos con
+    ingredientes externos o estructurales. La política endurece ese margen para
+    empujar al modelo a cocinar con la nevera real y, a la vez, filtra mejor
+    las recetas guardadas que servirán de contexto.
+    """
+    compatible_ingredient_count = len([ingredient for ingredient in usable_ingredients if ingredient.get("name")])
+    compatible_categories = {
+        normalize_label(str(ingredient.get("category") or ""))
+        for ingredient in usable_ingredients
+        if str(ingredient.get("category") or "").strip()
+    }
+    compatible_categories.discard("")
+    compatible_category_count = len(compatible_categories)
+
+    if (
+        compatible_ingredient_count >= RICH_FRIDGE_MIN_INGREDIENTS
+        and compatible_category_count >= RICH_FRIDGE_MIN_CATEGORIES
+    ):
+        return {
+            "mode": "rich_fridge",
+            "compatible_ingredient_count": compatible_ingredient_count,
+            "compatible_category_count": compatible_category_count,
+            "max_pantry_ingredients_per_recipe": 2,
+            "max_structural_pantry_ingredients_per_recipe": 0,
+            "single_fridge_ingredient_allows_structural_pantry": False,
+            "single_fridge_ingredient_max_pantry": 1,
+            "free_support_basics_do_not_count": True,
+            "summary": (
+                "Nevera rica: la despensa solo puede ser apoyo minimo. "
+                "Prioriza ingredientes reales de nevera y evita ingredientes estructurales de despensa."
+            ),
+        }
+
+    if (
+        compatible_ingredient_count >= MODERATE_FRIDGE_MIN_INGREDIENTS
+        and compatible_category_count >= MODERATE_FRIDGE_MIN_CATEGORIES
+    ):
+        return {
+            "mode": "moderate_fridge",
+            "compatible_ingredient_count": compatible_ingredient_count,
+            "compatible_category_count": compatible_category_count,
+            "max_pantry_ingredients_per_recipe": 2,
+            "max_structural_pantry_ingredients_per_recipe": 1,
+            "single_fridge_ingredient_allows_structural_pantry": False,
+            "single_fridge_ingredient_max_pantry": 1,
+            "free_support_basics_do_not_count": True,
+            "summary": (
+                "Nevera suficiente: la despensa puede apoyar, pero no debe resolver la estructura del plato."
+            ),
+        }
+
+    return {
+        "mode": "limited_fridge",
+        "compatible_ingredient_count": compatible_ingredient_count,
+        "compatible_category_count": compatible_category_count,
+        "max_pantry_ingredients_per_recipe": MAX_PANTRY_INGREDIENTS_PER_RECIPE,
+        "max_structural_pantry_ingredients_per_recipe": MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE,
+        "single_fridge_ingredient_allows_structural_pantry": False,
+        "single_fridge_ingredient_max_pantry": 2,
+        "free_support_basics_do_not_count": True,
+        "summary": "Nevera limitada: se permite algo mas de apoyo, sin convertir la despensa en base principal.",
+    }
 
 
 def _build_generation_context(
@@ -1830,6 +1919,7 @@ def _build_generation_context(
     dietary_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compone el contexto único que comparte generación semanal y sustituciones."""
+    pantry_policy = _contextual_pantry_policy(usable_ingredients)
     excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
     excluded_ingredient_names = [
         str(ingredient.get("name"))
@@ -1846,6 +1936,7 @@ def _build_generation_context(
             preferences,
             compatible_recipe_titles,
             favorite_recipe_titles,
+            pantry_policy,
         ),
         "available_ingredients": ingredients_for_generation(usable_ingredients),
         "excluded_ingredient_names": excluded_ingredient_names,
@@ -1862,13 +1953,7 @@ def _build_generation_context(
         "pantry_support_basics": PANTRY_SUPPORT_BASICS,
         "pantry_free_support_basics": PANTRY_FREE_SUPPORT_BASICS,
         "pantry_structural_basics": PANTRY_STRUCTURAL_BASICS,
-        "pantry_policy": {
-            "max_pantry_ingredients_per_recipe": MAX_PANTRY_INGREDIENTS_PER_RECIPE,
-            "max_structural_pantry_ingredients_per_recipe": MAX_STRUCTURAL_PANTRY_INGREDIENTS_PER_RECIPE,
-            "single_fridge_ingredient_allows_structural_pantry": False,
-            "single_fridge_ingredient_max_pantry": 2,
-            "free_support_basics_do_not_count": True,
-        },
+        "pantry_policy": pantry_policy,
     }
 
 
@@ -1890,8 +1975,10 @@ def _preferences_with_compatible_recipes(
     preferences: str,
     compatible_recipe_titles: list[str],
     favorite_recipe_titles: list[str],
+    pantry_policy: dict[str, Any] | None = None,
 ) -> str:
     """Refuerza el prompt con recordatorios de reutilización y política de despensa."""
+    pantry_policy = pantry_policy or {}
     parts = [preferences.strip()]
     parts.append(
         "Usa la nevera real como base del menu y no introduzcas ingredientes principales fuera de lo disponible."
@@ -1914,10 +2001,14 @@ def _preferences_with_compatible_recipes(
             + ", ".join(PANTRY_BASICS)
             + "."
         )
-        parts.append(
-            "No debe haber mas ingredientes de despensa que ingredientes reales de nevera en una receta, "
-            f"y solo se permite un ingrediente estructural de despensa por plato."
-        )
+        policy_summary = str(pantry_policy.get("summary") or "").strip()
+        if policy_summary:
+            parts.append(policy_summary)
+        else:
+            parts.append(
+                "No debe haber mas ingredientes de despensa que ingredientes reales de nevera en una receta, "
+                f"y solo se permite un ingrediente estructural de despensa por plato."
+            )
     return " ".join(part for part in parts if part)
 
 

@@ -1119,6 +1119,9 @@ def _build_weekly_prompt(
         "18. Reparte el uso entre distintas bases principales y evita apoyarte siempre en los mismos 3 o 4 ingredientes.\n"
         "19. Varía tipos de plato y títulos cuando sea posible: alterna ensaladas, salteados, pasta, arroz, horno, revueltos o bowls según encaje.\n"
         "20. Si una receta reciente y una nueva comparten ingrediente principal y tipo de plato, considera que siguen siendo demasiado parecidas y busca otra opcion si la nevera lo permite.\n"
+        "21. Si `politica_despensa.mode` es `rich_fridge`, construye cada plato casi por completo con ingredientes reales de nevera. En ese caso evita por completo `despensa_basica_estructural_limitada` y usa como mucho 1 o 2 apoyos menores de despensa si son imprescindibles.\n"
+        "22. No anadas extras optativos de despensa como miel, salsas, toppings o condimentos no listados solo para adornar o variar. Si no estan en la lista cerrada o no son basicos permitidos, no los uses.\n"
+        "23. Cuando haya varias combinaciones viables en la nevera, prefiere cambiar base principal, guarnicion o tecnica antes que introducir despensa adicional.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1165,6 +1168,8 @@ def _build_weekly_retry_prompt(
         "11. Evita repetir titulos de recetas recientes.\n"
         "12. Si la nevera ofrece variedad suficiente, cambia ingrediente principal o tecnica cuando un hueco repita demasiado platos recientes.\n"
         "13. Desprioriza `ingredientes_recientes_a_despriorizar` y `tipos_de_plato_recientes` cuando haya alternativas razonables en la nevera.\n"
+        "14. Si `politica_despensa.mode` es `rich_fridge`, rehace los huecos usando casi solo ingredientes reales de nevera y evita cualquier ingrediente estructural de despensa.\n"
+        "15. No introduzcas extras opcionales de despensa o ingredientes externos no listados solo para forzar variedad. Cambia antes la combinacion de nevera o la tecnica.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1192,6 +1197,8 @@ def _build_replacement_prompt(
         "La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         "Si el hueco venia de una receta demasiado reciente, cambia la base principal o la tecnica para que el plato se sienta distinto.\n"
         "Si hay suficientes ingredientes compatibles, evita apoyarte en `ingredientes_recientes_a_despriorizar` salvo que no haya una alternativa razonable.\n"
+        "Si `politica_despensa.mode` es `rich_fridge`, resuelve el plato con la nevera real y evita por completo `despensa_basica_estructural_limitada`.\n"
+        "No anadas ingredientes externos o extras optativos de despensa si el plato ya funciona con la combinacion disponible.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
@@ -1511,6 +1518,10 @@ def _validate_recipe_context(
         if any(_matches_name(ingredient_name, excluded_name) for excluded_name in excluded_names):
             excluded_hits.append(ingredient_name)
             continue
+        if any(_matches_name(ingredient_name, allowed_name) for allowed_name in allowed_names):
+            has_available_ingredient = True
+            fridge_ingredient_count += 1
+            continue
         if any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_basics):
             is_free_support = any(
                 _matches_name(ingredient_name, pantry_name) for pantry_name in pantry_free_support_basics
@@ -1523,11 +1534,7 @@ def _validate_recipe_context(
                 if not any(_matches_name(ingredient_name, pantry_name) for pantry_name in pantry_support_basics):
                     pantry_non_support_hits.append(ingredient_name)
             continue
-        if not any(_matches_name(ingredient_name, allowed_name) for allowed_name in allowed_names):
-            disallowed_hits.append(ingredient_name)
-            continue
-        has_available_ingredient = True
-        fridge_ingredient_count += 1
+        disallowed_hits.append(ingredient_name)
 
     if excluded_hits:
         return {

@@ -124,9 +124,38 @@ Regla de implementacion:
   - no se aborta prematuramente la reparacion por slots cuando el problema dominante es repetir recetas recientes
   - el sistema puede cerrar un slot con un candidato blando ya generado o reparado si no incumple ninguna regla dura
   - una nevera mas rica no debe empeorar el resultado solo porque Gemini se ancle en algunos platos faciles del menu anterior
+- Si el reporte semanal queda dominado por errores blandos, el limite de reparacion se amplía para intentar todos esos huecos antes de devolver error global.
 - La reparacion no debe entrar en bucles ni tormentas de llamadas:
   - se mantienen los intentos normales del flujo (respuesta inicial, retry semanal y una reparacion dirigida por slot)
   - el cierre con candidato blando solo aplica cuando no hay alternativa perfecta y no hay error duro
+
+### Variedad real con nevera amplia - 2026-04-16
+
+- Cuando la nevera tenga muchos ingredientes compatibles, el prompt semanal debe empujar variedad real y no solo evitar errores.
+- Regla aprobada:
+  - despriorizar ingredientes usados recientemente si hay alternativas comparables
+  - variar tambien el tipo de plato y la tecnica, no solo el titulo
+  - permitir recetas nuevas sin penalizarlas cuando la nevera ofrece espacio suficiente
+- El contexto del prompt separa:
+  - `recetas_recientes_a_evitar`
+  - `recetas_guardadas_compatibles` no recientes
+- No volver a pasar las recetas recientes como ejemplos positivos dentro de `recetas_guardadas_compatibles`, porque eso ancla al modelo al menu anterior.
+
+### Politica de despensa contextual - 2026-04-16
+
+- La despensa permitida deja de ser una regla fija para todos los casos.
+- Regla aprobada:
+  - nevera rica -> despensa minima
+  - nevera media -> despensa de apoyo moderado
+  - nevera limitada -> se mantiene algo mas de flexibilidad
+- Los basicos libres (`aceite de oliva`, `sal`, `pimienta`, `agua`) siguen sin contar mientras sean secundarios.
+- Cuando la nevera sea rica:
+  - no se deben usar ingredientes estructurales de despensa
+  - la receta debe construirse casi por completo con ingredientes reales de la nevera
+  - no se deben introducir extras optativos como miel, salsas o toppings si no son estrictamente necesarios
+- Correccion de validacion:
+  - si un ingrediente existe en la nevera y tambien forma parte de la lista de despensa permitida, debe contar como ingrediente real de nevera y no como despensa
+- La misma politica contextual se aplica al filtrado de `recetas_guardadas_compatibles` para no meter como ejemplo positivo recetas demasiado apoyadas en despensa.
 
 ### Heuristica de imagenes mas permisiva - 2026-04-15
 
