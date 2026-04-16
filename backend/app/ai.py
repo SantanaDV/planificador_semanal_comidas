@@ -42,6 +42,9 @@ MAX_IMAGE_ATTEMPTS = 3
 MAX_IMAGE_SEARCH_RESULTS = 4
 DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 _gemini_rate_limit_until = 0.0
+SOFT_INVALID_REASONS = {
+    "recent_recipe_repeated",
+}
 IMAGE_DISH_TYPE_TERMS = {
     "ensalada",
     "bowl",
@@ -296,12 +299,13 @@ def generate_weekly_menu(
     else:
         _log_weekly_validation_failure(retry_report, attempt="retry")
 
-    if len(retry_report["invalid_indices"]) > MAX_SLOT_REPAIR_ATTEMPTS:
+    slot_repair_limit = _slot_repair_limit_for_report(retry_report)
+    if len(retry_report["invalid_indices"]) > slot_repair_limit:
         context = {
             "error_type": "too_many_invalid_slots_after_retry",
             "retry_used": True,
             "invalid_slot_count": len(retry_report["invalid_indices"]),
-            "max_slot_repair_attempts": MAX_SLOT_REPAIR_ATTEMPTS,
+            "max_slot_repair_attempts": slot_repair_limit,
             "retry_invalid_indices": retry_report["invalid_indices"],
             "retry_invalid_reason": retry_report["invalid_reason"],
         }
@@ -352,6 +356,7 @@ def generate_weekly_menu(
             "Menu semanal completado con reparacion dirigida por slots IA",
             {
                 "repaired_item_count": repaired_menu["repaired_item_count"],
+                "soft_fallback_count": repaired_menu["soft_fallback_count"],
                 "slot_attempt_count": repaired_menu["slot_attempt_count"],
             },
         )
@@ -364,6 +369,7 @@ def generate_weekly_menu(
     unresolved_context = {
         "unresolved_indices": repaired_menu["unresolved_indices"],
         "repaired_item_count": repaired_menu["repaired_item_count"],
+        "soft_fallback_count": repaired_menu["soft_fallback_count"],
         "slot_attempt_count": repaired_menu["slot_attempt_count"],
         "initial_invalid_indices": report["invalid_indices"],
         "retry_invalid_indices": retry_report["invalid_indices"],
@@ -1106,6 +1112,8 @@ def _build_weekly_prompt(
         "14. La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         "15. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
         "16. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
+        "17. Cuando haya muchos ingredientes compatibles, reparte el uso entre distintas bases principales y evita apoyarte siempre en los mismos 3 o 4 ingredientes.\n"
+        "18. Varía tipos de plato y títulos cuando sea posible: alterna ensaladas, salteados, pasta, arroz, horno, revueltos o bowls según encaje.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1150,6 +1158,7 @@ def _build_weekly_retry_prompt(
         "9. La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         "10. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
         "11. Evita repetir titulos de recetas recientes.\n"
+        "12. Si la nevera ofrece variedad suficiente, cambia ingrediente principal o tecnica cuando un hueco repita demasiado platos recientes.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1175,6 +1184,7 @@ def _build_replacement_prompt(
         "Los ingredientes de `despensa_basica_apoyo_libre` no cuentan para el limite de despensa si siguen siendo secundarios.\n"
         "La despensa basica solo puede apoyar: no debe haber mas ingredientes de despensa contables que de nevera, y si solo usas 1 ingrediente de nevera no puedes apoyarte en ingredientes estructurales de despensa.\n"
         "La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
+        "Si el hueco venia de una receta demasiado reciente, cambia la base principal o la tecnica para que el plato se sienta distinto.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
@@ -1368,6 +1378,7 @@ def _invalid_weekly_issue(
         "valid": False,
         "validation_stage": validation_stage,
         "invalid_reason": invalid_reason,
+        "error_severity": _invalid_reason_severity(invalid_reason),
         "title": title,
         "ingredients": ingredients or [],
         "invalid_ingredients": invalid_ingredients or [],
@@ -1387,6 +1398,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "missing_ingredients",
+            "error_severity": _invalid_reason_severity("missing_ingredients"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [],
             "invalid_ingredients": [],
@@ -1443,6 +1455,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "recent_recipe_repeated",
+            "error_severity": _invalid_reason_severity("recent_recipe_repeated"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": [],
@@ -1454,6 +1467,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "missing_ingredients",
+            "error_severity": _invalid_reason_severity("missing_ingredients"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [],
             "invalid_ingredients": [],
@@ -1465,6 +1479,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": dietary_conflict["invalid_reason"],
+            "error_severity": _invalid_reason_severity(dietary_conflict["invalid_reason"]),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": dietary_conflict["invalid_ingredients"],
@@ -1505,6 +1520,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "excluded_ingredient",
+            "error_severity": _invalid_reason_severity("excluded_ingredient"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": excluded_hits,
@@ -1515,6 +1531,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "ingredient_not_allowed",
+            "error_severity": _invalid_reason_severity("ingredient_not_allowed"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": disallowed_hits,
@@ -1525,6 +1542,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "missing_available_ingredient",
+            "error_severity": _invalid_reason_severity("missing_available_ingredient"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": [],
@@ -1535,6 +1553,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "too_many_pantry_ingredients",
+            "error_severity": _invalid_reason_severity("too_many_pantry_ingredients"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_hits,
@@ -1545,6 +1564,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "pantry_outweighs_fridge",
+            "error_severity": _invalid_reason_severity("pantry_outweighs_fridge"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_hits,
@@ -1555,6 +1575,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "too_many_structural_pantry_ingredients",
+            "error_severity": _invalid_reason_severity("too_many_structural_pantry_ingredients"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_hits,
@@ -1565,6 +1586,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "pantry_overrides_single_fridge_ingredient",
+            "error_severity": _invalid_reason_severity("pantry_overrides_single_fridge_ingredient"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_hits,
@@ -1575,6 +1597,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "structural_pantry_with_single_fridge_ingredient",
+            "error_severity": _invalid_reason_severity("structural_pantry_with_single_fridge_ingredient"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_hits,
@@ -1585,6 +1608,7 @@ def _validate_recipe_context(
             "valid": False,
             "validation_stage": "recipe_context",
             "invalid_reason": "pantry_dependency_too_high",
+            "error_severity": _invalid_reason_severity("pantry_dependency_too_high"),
             "title": str(recipe.get("title") or "") or None,
             "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
             "invalid_ingredients": pantry_non_support_hits,
@@ -1594,6 +1618,7 @@ def _validate_recipe_context(
         "valid": True,
         "validation_stage": "ok",
         "invalid_reason": None,
+        "error_severity": None,
         "title": str(recipe.get("title") or "") or None,
         "ingredients": [str(value) for value in ingredient_values if str(value).strip()],
         "invalid_ingredients": [],
@@ -1612,6 +1637,16 @@ def _normalize_free_text(value: str) -> str:
     cleaned = "".join(character for character in decomposed if not combining(character))
     cleaned = re.sub(r"[^a-z0-9\s]+", " ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _invalid_reason_severity(reason: str | None) -> str | None:
+    """Clasifica si un motivo invalida de forma dura o solo degrada la calidad."""
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        return None
+    if normalized_reason in SOFT_INVALID_REASONS:
+        return "soft"
+    return "hard"
 
 
 def _matches_name(left: str, right: str) -> bool:
@@ -1831,6 +1866,7 @@ def _repair_weekly_slots_with_ai(
     final_items: list[dict[str, Any]] = []
     blocked_titles: list[str] = []
     repaired_item_count = 0
+    soft_fallback_count = 0
     slot_attempt_count = 0
     unresolved_indices: list[int] = []
     repair_failures: list[dict[str, Any]] = []
@@ -1849,8 +1885,16 @@ def _repair_weekly_slots_with_ai(
             _register_used_title(blocked_titles, selected_item)
             continue
 
+        soft_fallback_item = _select_soft_weekly_item(
+            index=index,
+            initial_items=initial_items,
+            initial_report=initial_report,
+            retry_items=retry_items,
+            retry_report=retry_report,
+            ingredients=ingredients,
+        )
         slot_attempt_count += 1
-        repaired_item, failure = _repair_weekly_slot_with_ai(
+        repaired_item, failure, soft_repair_item = _repair_weekly_slot_with_ai(
             index=index,
             ingredients=ingredients,
             generation_context=generation_context,
@@ -1862,12 +1906,32 @@ def _repair_weekly_slots_with_ai(
             _register_used_title(blocked_titles, repaired_item)
             continue
 
+        selected_soft_item = soft_repair_item or soft_fallback_item
+        if selected_soft_item:
+            final_items.append(selected_soft_item)
+            soft_fallback_count += 1
+            _register_used_title(blocked_titles, selected_soft_item)
+            record_log(
+                "warning",
+                "ai",
+                "Slot semanal cerrado con el mejor candidato disponible pese a un error blando",
+                {
+                    "index": index,
+                    "day_name": DAYS[index // 2],
+                    "meal_type": MEAL_TYPES[index % 2],
+                    "invalid_reason": failure.get("invalid_reason"),
+                    "source": "slot_repair" if soft_repair_item else "weekly_candidate",
+                },
+            )
+            continue
+
         unresolved_indices.append(index)
         repair_failures.append(failure)
         if failure.get("call_status") == "rate_limited":
             return {
                 "items": final_items,
                 "repaired_item_count": repaired_item_count,
+                "soft_fallback_count": soft_fallback_count,
                 "slot_attempt_count": slot_attempt_count,
                 "unresolved_count": len(unresolved_indices),
                 "unresolved_indices": unresolved_indices,
@@ -1879,6 +1943,7 @@ def _repair_weekly_slots_with_ai(
     return {
         "items": final_items,
         "repaired_item_count": repaired_item_count,
+        "soft_fallback_count": soft_fallback_count,
         "slot_attempt_count": slot_attempt_count,
         "unresolved_count": len(unresolved_indices),
         "unresolved_indices": unresolved_indices,
@@ -1894,7 +1959,7 @@ def _repair_weekly_slot_with_ai(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
     blocked_titles: list[str],
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any] | None]:
     """Repara un único slot con un prompt de sustitución acotado.
 
     Se reutiliza el mismo camino de sustitución porque es más estable que pedir
@@ -1921,7 +1986,7 @@ def _repair_weekly_slot_with_ai(
             "La reparacion IA de un slot semanal no devolvio una receta valida",
             failure,
         )
-        return None, failure
+        return None, failure, None
 
     recipe_report = _validate_recipe_context(payload["recipe"], ingredients, repair_context)
     if not recipe_report["valid"]:
@@ -1931,17 +1996,32 @@ def _repair_weekly_slot_with_ai(
             "meal_type": meal_type,
             "failure_stage": recipe_report["validation_stage"],
             "invalid_reason": recipe_report["invalid_reason"],
+            "error_severity": recipe_report.get("error_severity"),
             "title": recipe_report["title"],
             "invalid_ingredients": recipe_report["invalid_ingredients"],
             "call_status": call_meta.get("status"),
         }
+        soft_candidate = None
+        if recipe_report.get("error_severity") == "soft":
+            soft_candidate = _normalized_soft_weekly_item(
+                index=index,
+                item={
+                    "day_index": day_index,
+                    "day_name": DAYS[day_index],
+                    "meal_type": meal_type,
+                    "recipe": payload["recipe"],
+                    "explanation": payload.get("explanation", "Plato alternativo para completar el menu semanal."),
+                },
+                ingredients=ingredients,
+                source=settings.gemini_model,
+            )
         record_log(
             "warning",
             "ai",
             "La reparacion IA de un slot semanal fue rechazada por validacion",
             failure,
         )
-        return None, failure
+        return None, failure, soft_candidate
 
     item = _normalize_item(
         {
@@ -1969,7 +2049,7 @@ def _repair_weekly_slot_with_ai(
         "failure_stage": None,
         "invalid_reason": None,
         "call_status": call_meta.get("status"),
-    }
+    }, None
 
 
 def _generation_context_for_slot_repair(
@@ -2007,6 +2087,68 @@ def _payload_items(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if isinstance(payload, dict) and isinstance(payload.get("items"), list):
         return payload["items"]
     return []
+
+
+def _slot_repair_limit_for_report(report: ValidationReport) -> int:
+    """Amplía la reparación cuando el único problema es repetir recetas recientes.
+
+    Repetir títulos exactos es un fallo molesto pero recuperable: la ruta de
+    sustitución por slot suele producir alternativas válidas con el mismo
+    contexto. En ese caso no conviene abortar tras cuatro huecos porque una
+    nevera más rica puede seguir necesitando más reemplazos para escapar del
+    menú anterior.
+    """
+    invalid_items = report.get("invalid_items") or []
+    if invalid_items and all(item.get("error_severity") == "soft" for item in invalid_items):
+        return EXPECTED_WEEKLY_ITEMS
+    return MAX_SLOT_REPAIR_ATTEMPTS
+
+
+def _select_soft_weekly_item(
+    *,
+    index: int,
+    initial_items: list[dict[str, Any]],
+    initial_report: ValidationReport,
+    retry_items: list[dict[str, Any]],
+    retry_report: ValidationReport,
+    ingredients: list[dict[str, str | None]],
+) -> dict[str, Any] | None:
+    retry_slot = retry_report["slot_reports"][index]
+    if retry_slot.get("error_severity") == "soft" and index < len(retry_items):
+        return _normalized_soft_weekly_item(
+            index=index,
+            item=retry_items[index],
+            ingredients=ingredients,
+            source=settings.gemini_model,
+        )
+
+    initial_slot = initial_report["slot_reports"][index]
+    if initial_slot.get("error_severity") == "soft" and index < len(initial_items):
+        return _normalized_soft_weekly_item(
+            index=index,
+            item=initial_items[index],
+            ingredients=ingredients,
+            source=settings.gemini_model,
+        )
+    return None
+
+
+def _normalized_soft_weekly_item(
+    *,
+    index: int,
+    item: dict[str, Any],
+    ingredients: list[dict[str, str | None]],
+    source: str,
+) -> dict[str, Any] | None:
+    if not isinstance(item, dict) or not isinstance(item.get("recipe"), dict):
+        return None
+    day_index = int(item.get("day_index", index // 2)) % 7
+    meal_type = str(item.get("meal_type") or MEAL_TYPES[index % 2]).lower()
+    if meal_type not in MEAL_TYPES:
+        meal_type = MEAL_TYPES[index % 2]
+    normalized = _normalize_item(item, day_index, meal_type, ingredients)
+    _annotate_item_recipe_source(normalized, source)
+    return normalized
 
 
 def _select_valid_weekly_item(

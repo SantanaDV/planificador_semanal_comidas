@@ -113,6 +113,21 @@ Regla de implementacion:
   - se responde con `400`
   - el mensaje debe ser accionable y explicar que faltan ingredientes compatibles o que hay que relajar preferencias o restricciones
 
+### Robustez semanal ante errores blandos - 2026-04-16
+
+- La generacion semanal distingue entre errores duros y errores blandos por slot.
+- Regla aprobada:
+  - errores duros nunca pueden sobrevivir al menu final
+  - errores blandos pueden sobrevivir como mejor candidato disponible si no aparece una alternativa perfecta tras los intentos normales del flujo
+- En la implementacion actual, `recent_recipe_repeated` pasa a tratarse como error blando.
+- Consecuencias:
+  - no se aborta prematuramente la reparacion por slots cuando el problema dominante es repetir recetas recientes
+  - el sistema puede cerrar un slot con un candidato blando ya generado o reparado si no incumple ninguna regla dura
+  - una nevera mas rica no debe empeorar el resultado solo porque Gemini se ancle en algunos platos faciles del menu anterior
+- La reparacion no debe entrar en bucles ni tormentas de llamadas:
+  - se mantienen los intentos normales del flujo (respuesta inicial, retry semanal y una reparacion dirigida por slot)
+  - el cierre con candidato blando solo aplica cuando no hay alternativa perfecta y no hay error duro
+
 ### Heuristica de imagenes mas permisiva - 2026-04-15
 
 - La seleccion de imagenes para recetas no debe exigir coincidencia literal de todos los ingredientes.

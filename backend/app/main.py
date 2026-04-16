@@ -548,6 +548,7 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
     previous_titles = _previous_menu_recipe_titles(session)
     dietary_rules = ai.infer_dietary_rules(payload.preferences)
     ingredients, diet_removed_ingredient_names = _filter_preference_compatible_ingredients(usable_ingredients, dietary_rules)
+    ingredients = _prepare_generation_ingredients(ingredients)
     compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
@@ -749,6 +750,7 @@ def replace_menu_item(
 
     recent_titles = _replacement_recipe_titles(session, menu.id)
     dietary_rules = ai.infer_dietary_rules(payload.preferences)
+    ingredients = _prepare_generation_ingredients(ingredients)
     compatible_saved_recipes = _compatible_saved_recipe_context(
         all_ingredients,
         ingredients,
@@ -1433,6 +1435,63 @@ def _filter_preference_compatible_ingredients(
             continue
         compatible.append(ingredient)
     return compatible, _ordered_unique_names(removed_names)
+
+
+def _prepare_generation_ingredients(
+    ingredients: list[dict[str, str | None]],
+) -> list[dict[str, str | None]]:
+    """Limpia la nevera antes de construir el contexto del generador.
+
+    La UI puede contener duplicados del mismo ingrediente o filas con metadatos
+    desiguales. Para el modelo interesa una lista más compacta y coherente:
+    un único registro por nombre normalizado, conservando la mejor cantidad,
+    categoría y fecha disponibles.
+    """
+    merged_by_name: dict[str, dict[str, str | None]] = {}
+    ordered_keys: list[str] = []
+    for ingredient in ingredients:
+        name = str(ingredient.get("name") or "").strip()
+        if not name:
+            continue
+        key = normalize_label(name)
+        current = merged_by_name.get(key)
+        if current is None:
+            merged_by_name[key] = {
+                "id": str(ingredient.get("id") or "").strip() or None,
+                "name": name,
+                "quantity": str(ingredient.get("quantity") or "").strip() or None,
+                "category": str(ingredient.get("category") or "").strip() or None,
+                "expires_at": str(ingredient.get("expires_at") or "").strip() or None,
+            }
+            ordered_keys.append(key)
+            continue
+        merged_by_name[key] = _merge_generation_ingredient_records(current, ingredient)
+    return [merged_by_name[key] for key in ordered_keys]
+
+
+def _merge_generation_ingredient_records(
+    current: dict[str, str | None],
+    candidate: dict[str, str | None],
+) -> dict[str, str | None]:
+    """Combina dos filas del mismo ingrediente priorizando el dato más útil."""
+    candidate_quantity = str(candidate.get("quantity") or "").strip() or None
+    candidate_category = str(candidate.get("category") or "").strip() or None
+    candidate_expiry = str(candidate.get("expires_at") or "").strip() or None
+
+    if not current.get("quantity") and candidate_quantity:
+        current["quantity"] = candidate_quantity
+
+    current_category = normalize_label(str(current.get("category") or ""))
+    if candidate_category and (not current.get("category") or current_category in {"", "otros"}):
+        current["category"] = candidate_category
+
+    current_expiry = str(current.get("expires_at") or "").strip() or None
+    if current_expiry is None and candidate_expiry is not None:
+        current["expires_at"] = candidate_expiry
+    elif current_expiry and candidate_expiry:
+        current["expires_at"] = min(current_expiry, candidate_expiry)
+
+    return current
 
 
 def _menu_generation_viability_report(
