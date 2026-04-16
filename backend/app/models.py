@@ -1,3 +1,10 @@
+"""Modelos persistentes del backend.
+
+El esquema prioriza un MVP ejecutable: un único usuario demo, recetas
+persistidas, menús semanales con sus slots y una tabla de logs estructurados
+para explicar decisiones y fallos durante la demo.
+"""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -11,10 +18,13 @@ from .database import Base
 
 
 def new_id() -> str:
+    """Genera IDs UUID string para mantener el esquema simple y portable."""
     return str(uuid4())
 
 
 class User(Base):
+    """Usuario demo propietario de ingredientes, recetas y menús."""
+
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -28,6 +38,8 @@ class User(Base):
 
 
 class IngredientCategory(Base):
+    """Categoría persistida para evitar listas hardcodeadas en frontend."""
+
     __tablename__ = "ingredient_categories"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -39,6 +51,8 @@ class IngredientCategory(Base):
 
 
 class Ingredient(Base):
+    """Ingrediente disponible en la nevera del usuario demo."""
+
     __tablename__ = "ingredients"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -56,10 +70,13 @@ class Ingredient(Base):
 
     @property
     def category(self) -> str | None:
+        """Devuelve el nombre de categoría ya resuelto, incluyendo legado."""
         return self.category_ref.name if self.category_ref else self.legacy_category
 
 
 class Recipe(Base):
+    """Receta persistida, creada manualmente o derivada de un menú generado."""
+
     __tablename__ = "recipes"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -90,6 +107,8 @@ class Recipe(Base):
 
 
 class WeeklyMenu(Base):
+    """Cabecera de un menú semanal generado para una semana concreta."""
+
     __tablename__ = "weekly_menus"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -110,6 +129,8 @@ class WeeklyMenu(Base):
 
 
 class MenuItem(Base):
+    """Hueco individual del menú semanal enlazado opcionalmente a una receta."""
+
     __tablename__ = "menu_items"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -126,6 +147,8 @@ class MenuItem(Base):
 
 
 class SystemLog(Base):
+    """Bitácora ligera de eventos funcionales y errores del sistema."""
+
     __tablename__ = "system_logs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

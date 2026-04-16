@@ -1,3 +1,10 @@
+"""Persistencia de logs estructurados del backend y del frontend.
+
+El proyecto usa `system_logs` como pista de auditoría ligera durante la demo:
+errores HTTP, decisiones de fallback, saturación de Gemini y eventos críticos
+de UI acaban aquí para poder explicarlos sin depender solo de la consola.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -20,6 +27,11 @@ def record_log(
     context: dict[str, Any] | None = None,
     stack_trace: str | None = None,
 ) -> None:
+    """Persiste un log estructurado y nunca propaga fallos de escritura.
+
+    Registrar un evento no puede romper el flujo principal; si la base de datos
+    falla, el error se degrada al logger estándar del proceso.
+    """
     normalized_level = level.lower().strip()
     if normalized_level not in VALID_LEVELS:
         normalized_level = "info"
@@ -41,6 +53,7 @@ def record_log(
 
 
 def record_exception(module: str, message: str, error: BaseException, context: dict[str, Any] | None = None) -> None:
+    """Atajo para registrar excepciones con tipo y stack trace completos."""
     record_log(
         "error",
         module,
@@ -51,6 +64,7 @@ def record_exception(module: str, message: str, error: BaseException, context: d
 
 
 def _safe_context(context: dict[str, Any] | None) -> dict[str, Any]:
+    """Oculta claves obvias antes de persistir contexto arbitrario."""
     if not context:
         return {}
     safe: dict[str, Any] = {}

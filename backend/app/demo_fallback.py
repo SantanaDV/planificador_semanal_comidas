@@ -1,3 +1,11 @@
+"""Fallback determinista para mantener la demo utilizable sin IA externa.
+
+No intenta ser inteligente: su papel es producir estructuras válidas y
+coherentes con la nevera actual cuando Gemini no está disponible o la cuota se
+agota. También sirve como referencia del contrato que deben respetar las
+integraciones de IA reales.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,6 +22,7 @@ def build_weekly_menu(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
 ) -> MenuPayload:
+    """Construye una semana completa reutilizando la misma heurística por slot."""
     items = []
     used_titles: set[str] = set()
     for day_index, _day in enumerate(DAYS):
@@ -43,6 +52,12 @@ def build_replacement_item(
     offset: int,
     used_titles: set[str] | None = None,
 ) -> RecipePayload:
+    """Genera un plato determinista para un hueco concreto del menú.
+
+    Primero intenta reaprovechar recetas guardadas compatibles. Si no hay una
+    opción defendible, cae a plantillas simples basadas en ingredientes reales
+    de la nevera para no inventar un plato completamente ajeno al contexto.
+    """
     names = [str(item.get("name")).strip() for item in ingredients if item.get("name")]
     if not names:
         names = ["verduras", "arroz", "huevos", "legumbres", "pasta", "pollo", "tomate"]
@@ -139,6 +154,7 @@ def _pick_saved_recipe(
     recent_titles: set[str],
     used_titles: set[str],
 ) -> dict[str, Any] | None:
+    """Selecciona la primera receta guardada que no rompa repetición reciente."""
     for recipe in saved_recipes:
         title = str(recipe.get("title") or "").strip()
         if not title:
@@ -153,6 +169,7 @@ def _pick_saved_recipe(
 
 
 def _saved_recipe_image_lookup_status(recipe: dict[str, Any]) -> str:
+    """Normaliza el estado visual de una receta guardada reutilizada por fallback."""
     status = str(recipe.get("image_lookup_status") or "").strip().lower()
     if status in {"pending", "found", "not_found", "invalid", "attempts_exhausted", "upstream_error"}:
         return status

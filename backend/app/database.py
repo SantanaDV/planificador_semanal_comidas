@@ -1,3 +1,5 @@
+"""Primitivas de acceso a base de datos para toda la aplicación."""
+
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -7,6 +9,8 @@ from .config import settings
 
 
 class Base(DeclarativeBase):
+    """Base declarativa común para todos los modelos SQLAlchemy."""
+
     pass
 
 
@@ -17,6 +21,7 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, clas
 
 
 def get_session() -> Generator[Session, None, None]:
+    """Entrega una sesión por request y garantiza su cierre al final del uso."""
     session = SessionLocal()
     try:
         yield session

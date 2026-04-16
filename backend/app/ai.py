@@ -1,3 +1,13 @@
+"""Integración con IA y heurísticas de validación del backend.
+
+Este módulo concentra dos piezas sensibles del MVP:
+
+1. La generación textual del menú semanal y de sustituciones mediante Gemini,
+   con validación fuerte, retry controlado y fallback determinista.
+2. La resolución de imágenes de receta por HTTP, a partir de búsquedas y
+   metadatos de páginas candidatas, sin consumir cuota de Gemini.
+"""
+
 from __future__ import annotations
 
 import json
@@ -186,6 +196,8 @@ INTERNAL_EXPLANATION_MARKERS = (
 
 
 class WeeklyMenuResolutionError(Exception):
+    """Error controlado cuando la IA no puede cerrar un menú semanal válido."""
+
     def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.context = context or {}
@@ -195,6 +207,7 @@ def generate_weekly_menu(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
 ) -> MenuPayload:
+    """Genera un menú semanal completo con recuperación escalonada."""
     prompt = _build_weekly_prompt(ingredients, generation_context)
     payload, call_meta = _call_gemini_with_meta(prompt, use_google_search=False, timeout_seconds=35)
     _annotate_weekly_recipe_sources(payload, settings.gemini_model)
@@ -203,6 +216,8 @@ def generate_weekly_menu(
         return _build_ai_weekly_response(payload, retried=False)
 
     if payload is None:
+        # Los fallos de cuota e infraestructura deben conservarse como tales para
+        # que la API pueda responder con un mensaje honesto y trazable.
         if call_meta.get("status") == "rate_limited":
             context = {
                 "error_type": "rate_limited",
@@ -372,6 +387,7 @@ def generate_replacement(
     day_index: int,
     meal_type: str,
 ) -> RecipePayload:
+    """Genera un reemplazo para un único slot respetando el mismo contexto."""
     prompt = _build_replacement_prompt(ingredients, generation_context, day_index, meal_type)
     payload = _call_gemini(prompt, use_google_search=False, timeout_seconds=25)
     if payload and isinstance(payload.get("recipe"), dict) and _recipe_respects_context(
@@ -400,6 +416,7 @@ def generate_replacement(
 
 
 def infer_dietary_rules(preferences_text: str) -> dict[str, Any]:
+    """Extrae reglas duras de dieta a partir del texto libre de preferencias."""
     normalized_preferences = _normalize_free_text(preferences_text or "")
     is_vegan = any(label in normalized_preferences for label in {"vegano", "vegana"})
     is_vegetarian = is_vegan or any(label in normalized_preferences for label in {"vegetariano", "vegetariana"})
@@ -422,6 +439,7 @@ def infer_dietary_rules(preferences_text: str) -> dict[str, Any]:
 
 
 def recipe_conflicts_with_dietary_rules(recipe: dict[str, Any], dietary_rules: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Detecta ingredientes incompatibles sin depender solo del prompt."""
     rules = dietary_rules or {}
     forbidden_terms = [
         _normalize_name(str(term))
@@ -459,12 +477,15 @@ def recipe_conflicts_with_dietary_rules(recipe: dict[str, Any], dietary_rules: d
 
 
 def resolve_recipe_image(recipe: dict[str, Any]) -> dict[str, Any] | None:
+    """Resuelve o rota imágenes de receta usando solo búsqueda HTTP."""
     recipe_title = str(recipe.get("title") or "receta").strip() or "receta"
     cached_candidates = _cached_image_candidates(recipe)
     current_index = _coerce_int(recipe.get("image_candidate_index"))
     attempt_count = max(_coerce_int(recipe.get("image_lookup_attempt_count")), 0)
 
     if cached_candidates:
+        # Navegar por candidatos cacheados no debe consumir un intento nuevo de
+        # búsqueda; la idea es tratar el detalle como una galería estable.
         next_index = 0 if current_index < 0 else current_index + 1
         if next_index < len(cached_candidates):
             return _image_candidate_payload(
@@ -618,6 +639,7 @@ def _image_last_cached_candidate_payload(
 
 
 def _search_recipe_source_pages(recipe: dict[str, Any]) -> dict[str, Any]:
+    """Busca páginas fuente candidatas a partir de varias queries escalonadas."""
     queries = _image_search_queries(recipe)
     collected_urls: list[str] = []
     saw_upstream_error = False
@@ -646,6 +668,7 @@ def _search_recipe_source_pages(recipe: dict[str, Any]) -> dict[str, Any]:
 
 
 def _image_search_queries(recipe: dict[str, Any]) -> list[str]:
+    """Genera queries literales y semánticas para platos simples o genéricos."""
     title = str(recipe.get("title") or "").strip()
     if not title:
         return []
@@ -664,6 +687,7 @@ def _image_search_queries(recipe: dict[str, Any]) -> list[str]:
 
 
 def _recipe_image_dish_type(title: str) -> str:
+    """Infiera una familia visual simple a partir del título de la receta."""
     normalized_title = _normalize_name(title)
     for token in normalized_title.split():
         if token in IMAGE_DISH_TYPE_TERMS:
@@ -672,6 +696,7 @@ def _recipe_image_dish_type(title: str) -> str:
 
 
 def _recipe_image_primary_terms(recipe: dict[str, Any]) -> list[str]:
+    """Extrae 1-3 términos nucleares para no depender del título exacto."""
     terms: list[str] = []
     title = str(recipe.get("title") or "").strip()
     normalized_title = _normalize_name(title)
@@ -703,6 +728,7 @@ def _recipe_image_semantic_queries(
     dish_type: str,
     primary_terms: list[str],
 ) -> list[str]:
+    """Añade búsquedas más humanas para recetas visualmente genéricas."""
     tokens = set(_recipe_image_tokens(recipe))
     queries: list[str] = []
 
@@ -866,6 +892,7 @@ def _valid_image_candidates_from_source_page(source_url: str, recipe_title: str)
 
 
 def _is_promising_recipe_image(image_url: str) -> bool:
+    """Descarta URLs que casi seguro son ruido visual y no foto de plato."""
     parsed = urlparse(image_url)
     hostname = (parsed.netloc or "").lower()
     path = unquote(parsed.path or "").lower()
@@ -891,6 +918,11 @@ def _call_gemini_with_meta(
     use_google_search: bool,
     timeout_seconds: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Llama a Gemini y devuelve tanto payload como metadatos de la llamada.
+
+    Los metadatos son la pieza que luego permite distinguir entre respuesta
+    inválida, error remoto y rate limit sin esconder todo tras el mismo fallback.
+    """
     global _gemini_rate_limit_until
     if not settings.has_valid_gemini_api_key:
         record_log(
@@ -929,6 +961,8 @@ def _call_gemini_with_meta(
     if use_google_search:
         payload["tools"] = [{"google_search": {}}]
     else:
+        # Para generación textual exigimos JSON para simplificar validación y
+        # trazabilidad de errores. La búsqueda HTTP de imágenes vive fuera.
         generation_config["responseMimeType"] = "application/json"
 
     headers = {"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key or ""}
@@ -983,11 +1017,13 @@ def _call_gemini_with_meta(
 
 
 def _active_rate_limit_cooldown_seconds() -> int:
+    """Devuelve el cooldown local restante tras el último `429`."""
     remaining = int(round(_gemini_rate_limit_until - time.monotonic()))
     return max(remaining, 0)
 
 
 def _set_rate_limit_cooldown(retry_after_header: str | None) -> int:
+    """Fija una ventana local de enfriamiento para no insistir tras un `429`."""
     global _gemini_rate_limit_until
     cooldown_seconds = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
     if isinstance(retry_after_header, str):
@@ -1007,6 +1043,7 @@ def _call_gemini(
     use_google_search: bool = False,
     timeout_seconds: int = 25,
 ) -> dict[str, Any] | None:
+    """Atajo para llamadas que solo necesitan el payload y no la telemetría."""
     payload, _meta = _call_gemini_with_meta(
         prompt,
         use_google_search=use_google_search,
@@ -1209,6 +1246,11 @@ def _validate_weekly_payload(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
 ) -> ValidationReport:
+    """Valida estructura y contexto de los 14 slots del menú semanal.
+
+    Además de decidir si el payload es aceptable, devuelve un informe completo
+    para logging y para la posterior reparación dirigida por slots.
+    """
     report: ValidationReport = {
         "payload_present": payload is not None,
         "item_count": None,
@@ -1338,6 +1380,7 @@ def _validate_recipe_context(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
 ) -> dict[str, Any]:
+    """Comprueba que una receta encaja con nevera, dieta y política de despensa."""
     ingredient_values = recipe.get("ingredients")
     if not isinstance(ingredient_values, list) or not ingredient_values:
         return {
@@ -1602,6 +1645,7 @@ def normalize_menu_item(
     fallback_index: int,
     ingredients: list[dict[str, str | None]],
 ) -> RecipePayload:
+    """Normaliza un slot generado antes de persistirlo o devolverlo por API."""
     day_index = int(item.get("day_index", fallback_index // 2)) % 7
     meal_type = str(item.get("meal_type") or MEAL_TYPES[fallback_index % 2]).lower()
     if meal_type not in MEAL_TYPES:
@@ -1633,6 +1677,7 @@ def _normalize_item(
 
 
 def _normalize_explanation(value: Any, recipe: dict[str, Any]) -> str:
+    """Limpia la explicación para que suene a producto y no a prompt interno."""
     raw_text = _clean_text(value, 280)
     if not raw_text:
         return _fallback_user_explanation(recipe)
@@ -1657,6 +1702,7 @@ def _normalize_explanation(value: Any, recipe: dict[str, Any]) -> str:
 
 
 def _looks_like_internal_explanation(value: str) -> bool:
+    """Detecta lenguaje técnico o normativo impropio de la UX final."""
     normalized_value = _normalize_free_text(value)
     if not normalized_value:
         return True
@@ -1664,6 +1710,7 @@ def _looks_like_internal_explanation(value: str) -> bool:
 
 
 def _fallback_user_explanation(recipe: dict[str, Any]) -> str:
+    """Construye una explicación breve cuando la del modelo no es apta."""
     ingredient_names = [
         _ingredient_name_from_value(value).split(" - ", 1)[0].strip().lower()
         for value in (recipe.get("ingredients") or [])
@@ -1681,6 +1728,7 @@ def _fallback_user_explanation(recipe: dict[str, Any]) -> str:
 
 
 def _normalize_recipe(recipe: dict[str, Any], fallback_ingredients: list[str]) -> dict[str, Any]:
+    """Cierra huecos mínimos del payload para respetar el contrato interno."""
     title = str(recipe.get("title") or "Receta rapida de temporada")[:180]
     ingredient_lines = _normalize_ingredient_lines(recipe.get("ingredients"), fallback_ingredients)
     steps = _normalize_text_list(recipe.get("steps"), fallback=["Preparar ingredientes.", "Cocinar y servir."], limit=8)
@@ -1703,6 +1751,7 @@ def _normalize_recipe(recipe: dict[str, Any], fallback_ingredients: list[str]) -
 
 
 def _annotate_weekly_recipe_sources(payload: dict[str, Any] | None, source: str) -> None:
+    """Rellena el origen de las recetas generadas cuando el modelo no lo devuelve."""
     if not isinstance(payload, dict):
         return
     items = payload.get("items")
@@ -1722,6 +1771,7 @@ def _build_ai_weekly_response(
     retried: bool,
     repaired_slots: int = 0,
 ) -> MenuPayload:
+    """Enriquece la respuesta IA con metadatos legibles para la UI y los logs."""
     payload["ai_model"] = settings.gemini_model
     if repaired_slots > 0:
         payload["notes"] = (
@@ -1743,6 +1793,7 @@ def _build_full_fallback_weekly_response(
     report: ValidationReport,
     retry_used: bool,
 ) -> MenuPayload:
+    """Construye un menú completo de fallback y deja trazabilidad del motivo."""
     fallback = build_weekly_menu(ingredients, generation_context)
     fallback["ai_model"] = "fallback-local"
     fallback["notes"] = _weekly_fallback_note(reason, retry_used=retry_used)
@@ -1774,6 +1825,7 @@ def _repair_weekly_slots_with_ai(
     retry_payload: dict[str, Any] | None,
     retry_report: ValidationReport,
 ) -> dict[str, Any]:
+    """Reconstruye solo los slots inválidos reutilizando los que ya eran válidos."""
     initial_items = _payload_items(initial_payload)
     retry_items = _payload_items(retry_payload)
     final_items: list[dict[str, Any]] = []
@@ -1843,6 +1895,11 @@ def _repair_weekly_slot_with_ai(
     generation_context: GenerationContext,
     blocked_titles: list[str],
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Repara un único slot con un prompt de sustitución acotado.
+
+    Se reutiliza el mismo camino de sustitución porque es más estable que pedir
+    otro menú completo cuando solo falla una parte del payload.
+    """
     day_index = index // 2
     meal_type = MEAL_TYPES[index % 2]
     repair_context = _generation_context_for_slot_repair(generation_context, blocked_titles)
@@ -1985,6 +2042,7 @@ def _register_used_title(used_titles: list[str], item: dict[str, Any]) -> None:
 
 
 def _log_weekly_validation_failure(report: ValidationReport, *, attempt: str) -> None:
+    """Registra un resumen legible del primer motivo de rechazo semanal."""
     record_log(
         "warning",
         "ai",
@@ -2094,6 +2152,7 @@ def _empty_image_lookup() -> dict[str, Any]:
     }
 @lru_cache(maxsize=128)
 def _fetch_source_page(source_url: str) -> dict[str, str] | None:
+    """Descarga una página candidata para extraer sus metadatos de imagen."""
     headers = {
         "User-Agent": HTTP_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
@@ -2113,6 +2172,7 @@ def _fetch_source_page(source_url: str) -> dict[str, str] | None:
 
 
 def _extract_image_candidates_from_html(html: str, source_url: str) -> list[str]:
+    """Combina metadatos HTML y JSON-LD en una lista corta de candidatos únicos."""
     candidates: list[str] = []
     for candidate in _extract_meta_image_candidates(html):
         normalized = _normalize_html_image_candidate(candidate, source_url)
@@ -2226,6 +2286,7 @@ def _resolve_source_url(url: str) -> str | None:
 
 
 def _resolve_remote_url(url: str, expect_image: bool) -> str | None:
+    """Valida una URL remota siguiendo redirecciones y tipo de contenido."""
     headers = {
         "User-Agent": HTTP_USER_AGENT,
         "Accept": "image/*,*/*;q=0.8" if expect_image else "text/html,*/*;q=0.8",

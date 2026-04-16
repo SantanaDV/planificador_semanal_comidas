@@ -1,3 +1,10 @@
+"""Punto de entrada HTTP del backend.
+
+La API mantiene un alcance pequeño para el MVP, pero aquí viven las decisiones
+importantes de orquestación: preparación del contexto para IA, validaciones
+previas para no gastar cuota, persistencia de menús y política de imágenes.
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -71,6 +78,7 @@ MAX_RECIPE_IMAGE_CANDIDATES = 6
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """Inicializa esquema, datos base y usuario demo antes de aceptar tráfico."""
     Base.metadata.create_all(bind=engine)
     ensure_recipe_edit_columns()
     ensure_ingredient_schema()
@@ -136,6 +144,7 @@ def health() -> dict[str, str]:
 
 @app.get("/ai/status", response_model=AiStatusOut)
 def ai_status() -> AiStatusOut:
+    """Expone a la UI un estado simple y honesto de la integración IA."""
     configured = settings.has_valid_gemini_api_key
     return AiStatusOut(
         model=settings.gemini_model,
@@ -378,6 +387,7 @@ def update_recipe(recipe_id: str, payload: RecipeUpdate, session: Session = Depe
 
 @app.post("/recipes/{recipe_id}/resolve-image", response_model=RecipeOut)
 def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Resuelve o avanza la imagen de una receta concreta."""
     recipe = session.get(Recipe, recipe_id)
     if not recipe or recipe.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found")
@@ -408,6 +418,7 @@ def resolve_recipe_image(recipe_id: str, force: bool = Query(default=False), ses
 
 @app.post("/recipes/resolve-images", response_model=ResolveRecipeImagesOut)
 def resolve_recipe_images(payload: ResolveRecipeImagesRequest, session: Session = Depends(get_session)) -> ResolveRecipeImagesOut:
+    """Ejecuta un lote pequeño de resolución de imágenes para la grid de recetas."""
     query = select(Recipe).where(Recipe.user_id == DEMO_USER_ID).order_by(Recipe.created_at.desc())
     recipes = list(session.scalars(query))
     requested_ids = {recipe_id.strip() for recipe_id in payload.recipe_ids if recipe_id.strip()}
@@ -498,6 +509,7 @@ def delete_recipe(recipe_id: str, session: Session = Depends(get_session)) -> No
 
 @app.get("/menus/latest", response_model=WeeklyMenuOut | None)
 def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | None:
+    """Devuelve el último menú semanal persistido para el usuario demo."""
     menu = session.scalar(
         select(WeeklyMenu).where(WeeklyMenu.user_id == DEMO_USER_ID).order_by(WeeklyMenu.created_at.desc())
     )
@@ -506,6 +518,7 @@ def latest_menu(session: Session = Depends(get_session)) -> dict[str, Any] | Non
 
 @app.post("/menus/generate", response_model=WeeklyMenuOut, status_code=status.HTTP_201_CREATED)
 def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Genera y persiste un menú semanal completo."""
     ensure_demo_user(session)
     all_ingredients = _ingredient_payloads(session)
     excluded_ingredient_names = _excluded_ingredient_names(all_ingredients, payload.excluded_ingredient_ids)
@@ -543,6 +556,8 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         session,
         dietary_rules=dietary_rules,
     )
+    # Si la nevera ya es inviable con las preferencias actuales, aquí se corta
+    # antes de gastar cuota en Gemini y se devuelve un error accionable.
     viability_report = _menu_generation_viability_report(
         preferences=payload.preferences,
         compatible_ingredients=ingredients,
@@ -703,6 +718,7 @@ def replace_menu_item(
     payload: ReplaceItemRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    """Regenera un único slot del menú manteniendo las reglas del plan semanal."""
     menu = _get_menu(session, menu_id)
     item = _get_menu_item(session, menu_id, item_id)
     all_ingredients = _ingredient_payloads(session)
@@ -804,6 +820,7 @@ def use_saved_recipe(
     payload: UseRecipeRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    """Sustituye un slot por una receta ya guardada por el usuario demo."""
     menu = _get_menu(session, menu_id)
     item = _get_menu_item(session, menu_id, item_id)
     recipe = session.get(Recipe, payload.recipe_id)
@@ -825,6 +842,7 @@ def use_saved_recipe(
 
 
 def ensure_demo_user(session: Session) -> User:
+    """Garantiza la existencia del usuario demo que fija el alcance del MVP."""
     user = session.get(User, DEMO_USER_ID)
     if user:
         return user
@@ -835,6 +853,7 @@ def ensure_demo_user(session: Session) -> User:
 
 
 def ensure_recipe_edit_columns() -> None:
+    """Añade columnas de edición de recetas cuando se abre una base legacy."""
     inspector = inspect(engine)
     if "recipes" not in inspector.get_table_names():
         return
@@ -884,6 +903,7 @@ def ensure_recipe_edit_columns() -> None:
 
 
 def ensure_ingredient_schema() -> None:
+    """Asegura columnas nuevas de ingredientes sin requerir migraciones formales."""
     inspector = inspect(engine)
     if "ingredients" not in inspector.get_table_names():
         return
@@ -911,6 +931,7 @@ def ensure_ingredient_schema() -> None:
 
 
 def ensure_ingredient_categories(session: Session) -> None:
+    """Inserta las categorías base que usa la UI para clasificar ingredientes."""
     existing = {
         normalize_label(name)
         for name in session.scalars(select(IngredientCategory.name)).all()
@@ -930,6 +951,7 @@ def ensure_ingredient_categories(session: Session) -> None:
 
 
 def backfill_ingredient_categories(session: Session) -> None:
+    """Vincula ingredientes antiguos a categorías normalizadas del modelo actual."""
     categories_by_key = ingredient_category_map(session)
     fallback = categories_by_key.get(normalize_label("Otros"))
     if not fallback:
@@ -953,6 +975,7 @@ def backfill_ingredient_categories(session: Session) -> None:
 
 
 def backfill_demo_ingredient_details(session: Session) -> None:
+    """Rellena metadatos de ingredientes demo creados antes del esquema actual."""
     categories_by_key = ingredient_category_map(session)
     demo_by_name = {payload["name"].strip().lower(): payload for payload in DEMO_INGREDIENTS}
     ingredients = session.scalars(select(Ingredient).where(Ingredient.user_id == DEMO_USER_ID)).all()
@@ -986,6 +1009,7 @@ def backfill_demo_ingredient_details(session: Session) -> None:
 
 
 def ingredient_category_map(session: Session) -> dict[str, IngredientCategory]:
+    """Devuelve categorías indexadas por nombre normalizado para búsquedas rápidas."""
     return {
         normalize_label(category.name): category
         for category in session.scalars(select(IngredientCategory)).all()
@@ -993,6 +1017,7 @@ def ingredient_category_map(session: Session) -> dict[str, IngredientCategory]:
 
 
 def resolve_ingredient_category(session: Session, category_id: str | None) -> IngredientCategory:
+    """Resuelve la categoría pedida o crea la categoría por defecto si falta."""
     if category_id:
         category = session.get(IngredientCategory, category_id)
         if not category:
@@ -1011,11 +1036,13 @@ def resolve_ingredient_category(session: Session, category_id: str | None) -> In
 
 
 def normalize_label(value: str) -> str:
+    """Normaliza texto para comparaciones tolerantes a mayúsculas y tildes."""
     decomposed = normalize("NFKD", value.strip().casefold())
     return "".join(character for character in decomposed if not combining(character))
 
 
 def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
+    """Convierte un menú persistido en la forma estable que consume el frontend."""
     meal_order = {"comida": 0, "cena": 1}
     return {
         "id": menu.id,
@@ -1043,6 +1070,7 @@ def serialize_menu(menu: WeeklyMenu) -> dict[str, Any]:
 
 
 def _create_recipe_from_payload(session: Session, payload: dict[str, Any], source: str) -> Recipe:
+    """Persiste una receta generada o manual respetando el contrato común de receta."""
     prep_time_minutes = payload.get("prep_time_minutes", 25)
     image_fields = _normalize_recipe_image_fields(payload)
     persisted_source = str(payload.get("source") or source or "fallback-local").strip()[:120] or "fallback-local"
@@ -1072,6 +1100,7 @@ def _create_recipe_from_payload(session: Session, payload: dict[str, Any], sourc
 
 
 def _recipe_create_payload(payload: RecipeCreate) -> dict[str, Any]:
+    """Limpia el payload de creación manual antes de persistirlo."""
     data = payload.model_dump()
     data["title"] = data["title"].strip()
     data["description"] = data["description"].strip()
@@ -1085,6 +1114,7 @@ def _recipe_create_payload(payload: RecipeCreate) -> dict[str, Any]:
 
 
 def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
+    """Serializa una receta con campos derivados de imagen listos para la UI."""
     candidates = _normalize_image_candidates(recipe.image_candidates)
     image_lookup_status = _normalize_image_lookup_status(recipe.image_lookup_status, recipe.image_url)
     candidate_index = _normalize_image_candidate_index(recipe.image_candidate_index, len(candidates))
@@ -1126,6 +1156,7 @@ def _recipe_to_dict(recipe: Recipe) -> dict[str, Any]:
 
 
 def _recipe_image_resolution_context(recipe: Recipe) -> dict[str, Any]:
+    """Prepara el contexto mínimo que necesita el resolvedor de imágenes."""
     data = _recipe_to_dict(recipe)
     data["image_candidates"] = _normalize_image_candidates(recipe.image_candidates)
     data["image_candidate_index"] = _normalize_image_candidate_index(
@@ -1136,6 +1167,7 @@ def _recipe_image_resolution_context(recipe: Recipe) -> dict[str, Any]:
 
 
 def _normalize_recipe_image_fields(value: Any) -> dict[str, Any]:
+    """Normaliza payloads de imagen para que manual, batch y retry usen el mismo contrato."""
     payload = value if isinstance(value, dict) else {}
     image_url = _clean_optional_string(payload.get("image_url"), 500)
     image_source_url = _clean_optional_string(payload.get("image_source_url"), 500)
@@ -1167,6 +1199,7 @@ def _clean_optional_string(value: Any, limit: int) -> str | None:
 
 
 def _normalize_image_candidates(value: Any) -> list[dict[str, str]]:
+    """Filtra y deduplica candidatos de imagen persistibles."""
     if not isinstance(value, list):
         return []
     candidates: list[dict[str, str]] = []
@@ -1193,6 +1226,7 @@ def _normalize_image_candidates(value: Any) -> list[dict[str, str]]:
 
 
 def _normalize_image_candidate_index(value: Any, candidate_count: int) -> int | None:
+    """Valida el índice activo frente al número real de candidatos guardados."""
     if candidate_count <= 0:
         return None
     try:
@@ -1205,6 +1239,7 @@ def _normalize_image_candidate_index(value: Any, candidate_count: int) -> int | 
 
 
 def _normalize_image_lookup_status(value: Any, image_url: Any = None) -> str | None:
+    """Compacta estados legacy o incompletos a un conjunto pequeño y estable."""
     status = str(value or "").strip().lower()
     if status == "rate_limited":
         status = "pending"
@@ -1220,6 +1255,7 @@ def _utcnow() -> datetime:
 
 
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    """Fuerza datetimes a UTC para comparar cooldowns sin ambigüedad."""
     if value is None:
         return None
     if value.tzinfo is None:
@@ -1228,6 +1264,7 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
 
 
 def _apply_image_lookup_payload(recipe: Recipe, image_payload: dict[str, Any] | None) -> None:
+    """Aplica sobre la receta el resultado normalizado de una resolución de imagen."""
     now = _utcnow()
     payload = image_payload if isinstance(image_payload, dict) else {}
     candidates = _normalize_image_candidates(payload.get("image_candidates"))
@@ -1247,6 +1284,7 @@ def _apply_image_lookup_payload(recipe: Recipe, image_payload: dict[str, Any] | 
 
 
 def _image_retry_after_from_payload(payload: dict[str, Any], now: datetime) -> datetime | None:
+    """Asigna un pequeño enfriamiento solo a fallos externos recuperables."""
     status = _normalize_image_lookup_status(payload.get("image_lookup_status"))
     if status == "upstream_error":
         return now + timedelta(minutes=5)
@@ -1254,6 +1292,7 @@ def _image_retry_after_from_payload(payload: dict[str, Any], now: datetime) -> d
 
 
 def _needs_image_resolution(recipe: Recipe) -> bool:
+    """Decide si merece la pena lanzar búsqueda de imagen para esta receta."""
     if recipe.image_url:
         return False
     if _normalize_image_candidates(recipe.image_candidates):
@@ -1268,6 +1307,7 @@ def _needs_image_resolution(recipe: Recipe) -> bool:
 
 
 def _image_resolution_cooldown_active(recipe: Recipe) -> bool:
+    """Indica si la receta sigue en ventana de espera tras un error externo."""
     status = _normalize_image_lookup_status(recipe.image_lookup_status)
     if status != "upstream_error":
         return False
@@ -1276,6 +1316,7 @@ def _image_resolution_cooldown_active(recipe: Recipe) -> bool:
 
 
 def _should_skip_image_resolution(recipe: Recipe) -> bool:
+    """Pequeño wrapper semántico para expresar decisiones del batch de imágenes."""
     return not _needs_image_resolution(recipe)
 
 
@@ -1285,6 +1326,7 @@ def _image_batch_message(
     remaining_pending_count: int,
     stopped_reason: str | None,
 ) -> str:
+    """Construye un mensaje corto de progreso para la resolución batch de imágenes."""
     if stopped_reason == "upstream_error":
         return "La resolucion de imagenes se ha detenido temporalmente por un error al buscar o validar paginas externas."
     if attempted_count == 0:
@@ -1304,6 +1346,7 @@ def _image_can_retry(
     attempt_count: int,
     retry_after: datetime | None,
 ) -> bool:
+    """Expone si la UI puede ofrecer otra acción útil sobre la imagen actual."""
     normalized_status = _normalize_image_lookup_status(image_lookup_status, image_url)
     if normalized_status == "attempts_exhausted":
         return False
@@ -1317,6 +1360,7 @@ def _image_can_retry(
 
 
 def _difficulty_from_minutes(minutes: int) -> str:
+    """Deriva una dificultad legible para recetas que no la informan explícitamente."""
     if minutes <= 30:
         return "Facil"
     if minutes <= 45:
@@ -1325,6 +1369,7 @@ def _difficulty_from_minutes(minutes: int) -> str:
 
 
 def _ingredient_payloads(session: Session) -> list[dict[str, str | None]]:
+    """Recupera ingredientes en el formato plano que consume la capa de IA."""
     ingredients = session.scalars(select(Ingredient).where(Ingredient.user_id == DEMO_USER_ID)).all()
     return [
         {
@@ -1342,6 +1387,7 @@ def _filter_usable_ingredients(
     ingredients: list[dict[str, str | None]],
     excluded_ingredient_ids: list[str],
 ) -> list[dict[str, str | None]]:
+    """Elimina ingredientes excluidos manualmente antes de construir contexto."""
     excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
     if not excluded_ids:
         return ingredients
@@ -1352,6 +1398,7 @@ def _excluded_ingredient_names(
     ingredients: list[dict[str, str | None]],
     excluded_ingredient_ids: list[str],
 ) -> list[str]:
+    """Resuelve nombres humanos de los ingredientes excluidos para mensajes y logs."""
     excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
     if not excluded_ids:
         return []
@@ -1367,6 +1414,7 @@ def _filter_preference_compatible_ingredients(
     ingredients: list[dict[str, str | None]],
     dietary_rules: dict[str, Any] | None,
 ) -> tuple[list[dict[str, str | None]], list[str]]:
+    """Retira ingredientes incompatibles con restricciones duras antes de llamar a IA."""
     if not dietary_rules or not dietary_rules.get("strict"):
         return ingredients, []
 
@@ -1396,6 +1444,12 @@ def _menu_generation_viability_report(
     compatible_saved_recipes: list[dict[str, Any]],
     dietary_rules: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Evalúa si la nevera resultante tiene base suficiente para pedir un menú semanal.
+
+    La heurística es deliberadamente simple, pero contextual: endurece el mínimo
+    cuando el usuario combina restricciones fuertes y alta variedad, y lo relaja
+    ligeramente si ya existen varias recetas guardadas compatibles.
+    """
     preference_profile = _menu_preference_profile(preferences)
     compatible_names = [
         str(ingredient.get("name")).strip()
@@ -1475,6 +1529,7 @@ def _menu_generation_viability_report(
 
 
 def _menu_preference_profile(preferences: str) -> dict[str, Any]:
+    """Extrae solo las señales de preferencia que afectan a la viabilidad previa."""
     normalized_preferences = normalize_label(preferences)
     variety_level = "media"
     if "nivel de variedad semanal: alta" in normalized_preferences:
@@ -1492,6 +1547,7 @@ def _menu_preference_profile(preferences: str) -> dict[str, Any]:
 
 
 def _ordered_unique_names(values: list[str]) -> list[str]:
+    """Conserva orden humano mientras elimina duplicados por comparación normalizada."""
     seen: set[str] = set()
     ordered: list[str] = []
     for value in values:
@@ -1515,6 +1571,11 @@ def _compatible_saved_recipe_context(
     dietary_rules: dict[str, Any] | None = None,
     limit: int = 8,
 ) -> list[dict[str, Any]]:
+    """Selecciona recetas guardadas reutilizables dentro de las reglas del contexto.
+
+    Este filtro replica reglas duras del generador: exclusiones manuales,
+    restricciones dietarias y política de despensa básica.
+    """
     usable_names = {
         normalize_label(str(ingredient.get("name") or ""))
         for ingredient in usable_ingredients
@@ -1627,11 +1688,13 @@ def _compatible_saved_recipe_context(
 
 
 def _normalize_recipe_ingredient_name(value: str) -> str:
+    """Limpia adornos comunes de ingredientes guardados antes de compararlos."""
     name = value.split(" - ", 1)[0].split(":", 1)[0]
     return normalize_label(name)
 
 
 def _ingredient_name_matches(recipe_name: str, fridge_name: str) -> bool:
+    """Hace matching tolerante entre nevera y receta sin caer en substring ingenuo."""
     if len(recipe_name) < 3 or len(fridge_name) < 3:
         return False
     if recipe_name == fridge_name:
@@ -1649,6 +1712,7 @@ def _ingredient_name_matches(recipe_name: str, fridge_name: str) -> bool:
 
 
 def _ingredient_match_tokens(value: str) -> list[str]:
+    """Tokeniza nombres de ingrediente eliminando ruido frecuente en castellano."""
     stopwords = {"de", "del", "la", "el", "los", "las", "y", "con", "al", "a", "en"}
     tokens = [token for token in value.split() if token]
     normalized_tokens = []
@@ -1662,10 +1726,12 @@ def _ingredient_match_tokens(value: str) -> list[str]:
 
 
 def _is_pantry_basic(recipe_name: str) -> bool:
+    """Marca ingredientes permitidos como apoyo aunque no estén en la nevera."""
     return any(_ingredient_name_matches(recipe_name, normalize_label(value)) for value in PANTRY_BASICS)
 
 
 def _is_structural_pantry_basic(recipe_name: str) -> bool:
+    """Distingue básicos de despensa que cambian más la estructura del plato."""
     return any(_ingredient_name_matches(recipe_name, normalize_label(value)) for value in PANTRY_STRUCTURAL_BASICS)
 
 
@@ -1675,6 +1741,7 @@ def _recipe_uses_reasonable_pantry_support(
     pantry_ingredient_count: int,
     structural_pantry_count: int,
 ) -> bool:
+    """Aplica la política MVP para que la despensa siga siendo apoyo y no base."""
     if fridge_ingredient_count <= 0:
         return False
     if pantry_ingredient_count > MAX_PANTRY_INGREDIENTS_PER_RECIPE:
@@ -1699,6 +1766,7 @@ def _build_generation_context(
     compatible_saved_recipes: list[dict[str, Any]],
     dietary_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Compone el contexto único que comparte generación semanal y sustituciones."""
     excluded_ids = {ingredient_id.strip() for ingredient_id in excluded_ingredient_ids if ingredient_id.strip()}
     excluded_ingredient_names = [
         str(ingredient.get("name"))
@@ -1738,6 +1806,7 @@ def _build_generation_context(
 
 
 def ingredients_for_generation(ingredients: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
+    """Reduce el payload de ingredientes al mínimo útil para el modelo."""
     return [
         {
             "name": ingredient.get("name"),
@@ -1755,6 +1824,7 @@ def _preferences_with_compatible_recipes(
     compatible_recipe_titles: list[str],
     favorite_recipe_titles: list[str],
 ) -> str:
+    """Refuerza el prompt con recordatorios de reutilización y política de despensa."""
     parts = [preferences.strip()]
     parts.append(
         "Usa la nevera real como base del menu y no introduzcas ingredientes principales fuera de lo disponible."
@@ -1789,6 +1859,7 @@ def _insufficient_ingredient_detail(
     usable_ingredient_count: int,
     has_exclusions: bool,
 ) -> str:
+    """Devuelve mensajes de error accionables para neveras insuficientes."""
     if ingredient_count == 0:
         return "Anade ingredientes antes de generar el menu o carga ingredientes de prueba."
     if has_exclusions:
@@ -1800,6 +1871,7 @@ def _insufficient_ingredient_detail(
 
 
 def _previous_menu_recipe_titles(session: Session, exclude_menu_id: str | None = None) -> list[str]:
+    """Recupera títulos del menú anterior para preservar variedad intersemanal."""
     statement = (
         select(WeeklyMenu)
         .where(WeeklyMenu.user_id == DEMO_USER_ID)
@@ -1814,6 +1886,7 @@ def _previous_menu_recipe_titles(session: Session, exclude_menu_id: str | None =
 
 
 def _replacement_recipe_titles(session: Session, menu_id: str) -> list[str]:
+    """Une títulos del menú actual y del anterior para evitar repeticiones al reemplazar."""
     current_menu = _get_menu(session, menu_id)
     current_titles = [item.recipe.title for item in current_menu.items if item.recipe and item.recipe.title]
     previous_titles = _previous_menu_recipe_titles(session, exclude_menu_id=menu_id)
@@ -1829,6 +1902,7 @@ def _replacement_recipe_titles(session: Session, menu_id: str) -> list[str]:
 
 
 def _get_menu(session: Session, menu_id: str) -> WeeklyMenu:
+    """Carga un menú asegurando que pertenece al usuario demo."""
     menu = session.get(WeeklyMenu, menu_id)
     if not menu or menu.user_id != DEMO_USER_ID:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu not found")
@@ -1836,6 +1910,7 @@ def _get_menu(session: Session, menu_id: str) -> WeeklyMenu:
 
 
 def _get_menu_item(session: Session, menu_id: str, item_id: str) -> MenuItem:
+    """Carga un slot concreto validando que pertenece al menú solicitado."""
     item = session.get(MenuItem, item_id)
     if not item or item.menu_id != menu_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Menu item not found")
@@ -1843,5 +1918,6 @@ def _get_menu_item(session: Session, menu_id: str, item_id: str) -> MenuItem:
 
 
 def _current_week_start() -> date:
+    """Calcula el lunes de la semana actual para agrupar menús semanales."""
     today = date.today()
     return today - timedelta(days=today.weekday())

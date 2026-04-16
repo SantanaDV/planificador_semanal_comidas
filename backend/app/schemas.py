@@ -1,3 +1,9 @@
+"""Esquemas Pydantic que definen el contrato HTTP del backend.
+
+Se usan tanto para validar peticiones como para hacer explícito qué partes del
+modelo relacional se exponen al frontend y cuáles se mantienen internas.
+"""
+
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -5,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class IngredientCreate(BaseModel):
+    """Payload mínimo para crear un ingrediente desde la UI."""
+
     name: str = Field(min_length=1, max_length=120)
     quantity: str | None = Field(default=None, max_length=80)
     category_id: str | None = Field(default=None, max_length=36)
@@ -12,6 +20,8 @@ class IngredientCreate(BaseModel):
 
 
 class IngredientOut(BaseModel):
+    """Ingrediente serializado con la categoría ya resuelta para la UI."""
+
     id: str
     name: str
     quantity: str | None = None
@@ -24,6 +34,8 @@ class IngredientOut(BaseModel):
 
 
 class IngredientCategoryOut(BaseModel):
+    """Categoría disponible para altas y filtros de ingredientes."""
+
     id: str
     name: str
     sort_order: int = 0
@@ -33,6 +45,8 @@ class IngredientCategoryOut(BaseModel):
 
 
 class AiStatusOut(BaseModel):
+    """Estado simplificado de la integración IA mostrado en frontend."""
+
     provider: str = "gemini"
     model: str
     configured: bool
@@ -46,12 +60,16 @@ ImageLookupStatus = Literal["pending", "found", "not_found", "invalid", "attempt
 
 
 class RecipeImageCandidateOut(BaseModel):
+    """Candidato cacheado de imagen navegable desde el detalle de receta."""
+
     image_url: str = Field(max_length=500)
     image_source_url: str = Field(max_length=500)
     image_alt_text: str | None = Field(default=None, max_length=240)
 
 
 class RecipeCreate(BaseModel):
+    """Contrato base para crear o serializar una receta editable."""
+
     title: str = Field(min_length=1, max_length=180)
     description: str = ""
     ingredients: list[str] = Field(default_factory=list)
@@ -70,6 +88,8 @@ class RecipeCreate(BaseModel):
 
 
 class RecipeOut(RecipeCreate):
+    """Receta expuesta al frontend con estado completo de imagen y metadatos."""
+
     id: str
     image_candidates: list[RecipeImageCandidateOut] = Field(default_factory=list)
     image_candidate_index: int | None = None
@@ -85,6 +105,8 @@ class RecipeOut(RecipeCreate):
 
 
 class RecipeUpdate(BaseModel):
+    """Actualización parcial de una receta ya existente."""
+
     title: str | None = Field(default=None, min_length=1, max_length=180)
     description: str | None = None
     ingredients: list[str] | None = None
@@ -103,12 +125,16 @@ class RecipeUpdate(BaseModel):
 
 
 class ResolveRecipeImagesRequest(BaseModel):
+    """Petición batch para resolver imágenes de un conjunto acotado de recetas."""
+
     recipe_ids: list[str] = Field(default_factory=list)
     limit: int = Field(default=4, ge=1, le=8)
     force: bool = False
 
 
 class ResolveRecipeImagesOut(BaseModel):
+    """Resumen del lote de resolución de imágenes ejecutado por backend."""
+
     updated_recipes: list[RecipeOut] = Field(default_factory=list)
     attempted_count: int = 0
     updated_count: int = 0
@@ -119,6 +145,8 @@ class ResolveRecipeImagesOut(BaseModel):
 
 
 class MenuItemOut(BaseModel):
+    """Slot individual de comida o cena dentro del menú semanal serializado."""
+
     id: str
     day_index: int
     day_name: str
@@ -128,6 +156,8 @@ class MenuItemOut(BaseModel):
 
 
 class WeeklyMenuOut(BaseModel):
+    """Respuesta completa del menú semanal usado por dashboard y detalle."""
+
     id: str
     week_start_date: date
     preferences: dict
@@ -139,21 +169,29 @@ class WeeklyMenuOut(BaseModel):
 
 
 class GenerateMenuRequest(BaseModel):
+    """Entrada de generación semanal basada en preferencias y exclusiones."""
+
     preferences: str = ""
     excluded_ingredient_ids: list[str] = Field(default_factory=list)
     week_start_date: date | None = None
 
 
 class ReplaceItemRequest(BaseModel):
+    """Entrada para regenerar un único slot manteniendo el resto del menú."""
+
     preferences: str = ""
     excluded_ingredient_ids: list[str] = Field(default_factory=list)
 
 
 class UseRecipeRequest(BaseModel):
+    """Entrada mínima para fijar una receta guardada en un slot del menú."""
+
     recipe_id: str
 
 
 class SystemLogCreate(BaseModel):
+    """Evento estructurado enviado por frontend o backend a `system_logs`."""
+
     level: Literal["info", "warning", "error"] = "info"
     module: str = Field(min_length=1, max_length=80)
     message: str = Field(min_length=1)
@@ -162,6 +200,8 @@ class SystemLogCreate(BaseModel):
 
 
 class SystemLogOut(SystemLogCreate):
+    """Representación pública de un log persistido."""
+
     id: str
     created_at: datetime | None = None
 
