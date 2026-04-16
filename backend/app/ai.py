@@ -299,6 +299,7 @@ def generate_weekly_menu(
     else:
         _log_weekly_validation_failure(retry_report, attempt="retry")
 
+    severity_counts = _report_error_severity_counts(retry_report)
     slot_repair_limit = _slot_repair_limit_for_report(retry_report)
     if len(retry_report["invalid_indices"]) > slot_repair_limit:
         context = {
@@ -306,6 +307,8 @@ def generate_weekly_menu(
             "retry_used": True,
             "invalid_slot_count": len(retry_report["invalid_indices"]),
             "max_slot_repair_attempts": slot_repair_limit,
+            "soft_invalid_count": severity_counts["soft"],
+            "hard_invalid_count": severity_counts["hard"],
             "retry_invalid_indices": retry_report["invalid_indices"],
             "retry_invalid_reason": retry_report["invalid_reason"],
         }
@@ -1099,9 +1102,9 @@ def _build_weekly_prompt(
         "1. Usa los ingredientes disponibles como base principal del menu.\n"
         "2. Excluye por completo cualquier ingrediente marcado por el usuario.\n"
         "3. Respeta de forma estricta `restricciones_dieta_duras`. Si una receta incluye cualquier ingrediente de `ingredientes_prohibidos_por_dieta`, esa receta es invalida.\n"
-        "4. Prioriza recetas guardadas compatibles y, dentro de ellas, las favoritas compatibles no recientes.\n"
+        "4. Prioriza recetas guardadas compatibles no recientes y, dentro de ellas, las favoritas compatibles, pero no sacrifiques variedad real por reutilizarlas.\n"
         "5. Evita repetir titulos que aparezcan en las recetas recientes.\n"
-        "6. Solo crea recetas nuevas cuando no haya suficientes recetas guardadas compatibles para cubrir los huecos.\n"
+        "6. Usa recetas nuevas sin problema cuando la nevera tenga variedad suficiente y eso ayude a diferenciar el menu del reciente.\n"
         "7. Usa solo ingredientes principales de la lista cerrada `ingredientes_principales_permitidos`. No uses sinonimos, sustituciones o variantes que no aparezcan literalmente en esa lista.\n"
         "8. En el campo `ingredients` solo puedes incluir ingredientes de esa lista cerrada o ingredientes de `despensa_basica_permitida`, nunca otros ingredientes.\n"
         "9. La despensa basica solo puede actuar como apoyo. No la conviertas en la base real del plato ni en el elemento que define el tipo de receta.\n"
@@ -1112,8 +1115,10 @@ def _build_weekly_prompt(
         "14. La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         "15. Si no puedes completar los 14 huecos cumpliendo las reglas, repite tecnicas o combinaciones con ingredientes disponibles antes de introducir ingredientes nuevos.\n"
         "16. No inventes ingredientes principales fuera de la nevera. Solo puedes asumir despensa basica permitida y nunca como protagonista.\n"
-        "17. Cuando haya muchos ingredientes compatibles, reparte el uso entre distintas bases principales y evita apoyarte siempre en los mismos 3 o 4 ingredientes.\n"
-        "18. Varía tipos de plato y títulos cuando sea posible: alterna ensaladas, salteados, pasta, arroz, horno, revueltos o bowls según encaje.\n"
+        "17. Cuando `conteo_ingredientes_compatibles` sea alto, desprioriza `ingredientes_recientes_a_despriorizar` si existen otras bases comparables disponibles en la nevera.\n"
+        "18. Reparte el uso entre distintas bases principales y evita apoyarte siempre en los mismos 3 o 4 ingredientes.\n"
+        "19. Varía tipos de plato y títulos cuando sea posible: alterna ensaladas, salteados, pasta, arroz, horno, revueltos o bowls según encaje.\n"
+        "20. Si una receta reciente y una nueva comparten ingrediente principal y tipo de plato, considera que siguen siendo demasiado parecidas y busca otra opcion si la nevera lo permite.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1159,6 +1164,7 @@ def _build_weekly_retry_prompt(
         "10. Devuelve exactamente 14 items: comida y cena de lunes a domingo.\n"
         "11. Evita repetir titulos de recetas recientes.\n"
         "12. Si la nevera ofrece variedad suficiente, cambia ingrediente principal o tecnica cuando un hueco repita demasiado platos recientes.\n"
+        "13. Desprioriza `ingredientes_recientes_a_despriorizar` y `tipos_de_plato_recientes` cuando haya alternativas razonables en la nevera.\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
         "{\"items\":[{\"day_index\":0,\"day_name\":\"Lunes\",\"meal_type\":\"comida\",\"explanation\":\"...\","
@@ -1185,6 +1191,7 @@ def _build_replacement_prompt(
         "La despensa basica solo puede apoyar: no debe haber mas ingredientes de despensa contables que de nevera, y si solo usas 1 ingrediente de nevera no puedes apoyarte en ingredientes estructurales de despensa.\n"
         "La `explanation` debe sonar natural y breve para usuario final, en 1 o 2 frases, sin mencionar reglas, contexto, restricciones, prompt, sistema ni despensa permitida.\n"
         "Si el hueco venia de una receta demasiado reciente, cambia la base principal o la tecnica para que el plato se sienta distinto.\n"
+        "Si hay suficientes ingredientes compatibles, evita apoyarte en `ingredientes_recientes_a_despriorizar` salvo que no haya una alternativa razonable.\n"
         f"Dia: {DAYS[day_index]}, tipo: {meal_type}\n"
         f"Contexto de generacion: {json.dumps(prompt_context, ensure_ascii=False)}\n"
         "Formato exacto: "
@@ -1202,7 +1209,11 @@ def _prompt_context(
     ingredients: list[dict[str, str | None]],
     generation_context: GenerationContext,
 ) -> dict[str, Any]:
-    saved_recipes = generation_context.get("compatible_saved_recipes") or []
+    saved_recipes = [
+        recipe
+        for recipe in (generation_context.get("compatible_saved_recipes") or [])
+        if not recipe.get("is_recent")
+    ]
     allowed_ingredient_names = [
         str(ingredient.get("name"))
         for ingredient in ingredients
@@ -1210,6 +1221,7 @@ def _prompt_context(
     ]
     return {
         "ingredientes_principales_permitidos": allowed_ingredient_names,
+        "conteo_ingredientes_compatibles": len(allowed_ingredient_names),
         "ingredientes_disponibles": ingredients,
         "ingredientes_excluidos": generation_context.get("excluded_ingredient_names") or [],
         "restricciones_dieta_duras": (generation_context.get("dietary_rules") or {}).get("labels") or [],
@@ -1217,6 +1229,8 @@ def _prompt_context(
         "preferencias_usuario": generation_context.get("preferences_text") or "sin preferencias adicionales",
         "resumen_preferencias": generation_context.get("preferences_summary") or "",
         "recetas_recientes_a_evitar": generation_context.get("recent_recipe_titles") or [],
+        "ingredientes_recientes_a_despriorizar": generation_context.get("recent_ingredient_names") or [],
+        "tipos_de_plato_recientes": generation_context.get("recent_dish_types") or [],
         "despensa_basica_permitida": generation_context.get("pantry_basics") or [],
         "despensa_basica_apoyo": generation_context.get("pantry_support_basics") or [],
         "despensa_basica_apoyo_libre": generation_context.get("pantry_free_support_basics") or [],
@@ -2099,9 +2113,22 @@ def _slot_repair_limit_for_report(report: ValidationReport) -> int:
     menú anterior.
     """
     invalid_items = report.get("invalid_items") or []
-    if invalid_items and all(item.get("error_severity") == "soft" for item in invalid_items):
-        return EXPECTED_WEEKLY_ITEMS
+    if not invalid_items:
+        return MAX_SLOT_REPAIR_ATTEMPTS
+    severity_counts = _report_error_severity_counts(report)
+    if severity_counts["soft"] == len(invalid_items):
+        return len(invalid_items)
+    if severity_counts["soft"] >= severity_counts["hard"] and severity_counts["soft"] > 0:
+        return len(invalid_items)
     return MAX_SLOT_REPAIR_ATTEMPTS
+
+
+def _report_error_severity_counts(report: ValidationReport) -> dict[str, int]:
+    """Resume cuántos fallos blandos y duros hay en un reporte semanal."""
+    invalid_items = report.get("invalid_items") or []
+    soft = sum(1 for item in invalid_items if item.get("error_severity") == "soft")
+    hard = sum(1 for item in invalid_items if item.get("error_severity") == "hard")
+    return {"soft": soft, "hard": hard}
 
 
 def _select_soft_weekly_item(

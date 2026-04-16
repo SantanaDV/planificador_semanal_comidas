@@ -305,7 +305,6 @@ export function buildPreferencesSummary(settings: PreferenceSettings, ingredient
     excludedIngredientNames.length ? `Ingredientes excluidos: ${excludedIngredientNames.join(", ")}.` : "",
     settings.goals.length ? `Objetivos: ${settings.goals.join(", ")}.` : "",
     `Nivel de variedad semanal: ${settings.varietyLevel}.`,
-    "Evitar repetir platos recientes y priorizar ingredientes disponibles.",
   ]
     .filter(Boolean)
     .join(" ");

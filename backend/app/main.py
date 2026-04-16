@@ -545,7 +545,8 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
             ),
         )
 
-    previous_titles = _previous_menu_recipe_titles(session)
+    previous_recipe_context = _previous_menu_recipe_context(session)
+    previous_titles = [recipe["title"] for recipe in previous_recipe_context]
     dietary_rules = ai.infer_dietary_rules(payload.preferences)
     ingredients, diet_removed_ingredient_names = _filter_preference_compatible_ingredients(usable_ingredients, dietary_rules)
     ingredients = _prepare_generation_ingredients(ingredients)
@@ -592,6 +593,7 @@ def generate_menu(payload: GenerateMenuRequest, session: Session = Depends(get_s
         ingredients,
         payload.excluded_ingredient_ids,
         previous_titles,
+        previous_recipe_context,
         compatible_saved_recipes,
         dietary_rules=dietary_rules,
     )
@@ -769,6 +771,7 @@ def replace_menu_item(
         ingredients,
         payload.excluded_ingredient_ids,
         recent_titles,
+        [],
         compatible_saved_recipes,
         dietary_rules=dietary_rules,
     )
@@ -1822,6 +1825,7 @@ def _build_generation_context(
     usable_ingredients: list[dict[str, str | None]],
     excluded_ingredient_ids: list[str],
     recent_recipe_titles: list[str],
+    recent_recipe_context: list[dict[str, Any]],
     compatible_saved_recipes: list[dict[str, Any]],
     dietary_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1846,6 +1850,10 @@ def _build_generation_context(
         "available_ingredients": ingredients_for_generation(usable_ingredients),
         "excluded_ingredient_names": excluded_ingredient_names,
         "recent_recipe_titles": recent_recipe_titles,
+        "recent_recipe_context": recent_recipe_context,
+        "recent_ingredient_names": _recent_menu_ingredient_names(recent_recipe_context),
+        "recent_dish_types": _recent_menu_dish_types(recent_recipe_context),
+        "compatible_ingredient_count": len(usable_ingredients),
         "compatible_saved_recipes": compatible_saved_recipes,
         "compatible_recipe_titles": compatible_recipe_titles,
         "favorite_recipe_titles": favorite_recipe_titles,
@@ -1931,6 +1939,14 @@ def _insufficient_ingredient_detail(
 
 def _previous_menu_recipe_titles(session: Session, exclude_menu_id: str | None = None) -> list[str]:
     """Recupera títulos del menú anterior para preservar variedad intersemanal."""
+    return [recipe["title"] for recipe in _previous_menu_recipe_context(session, exclude_menu_id=exclude_menu_id)]
+
+
+def _previous_menu_recipe_context(
+    session: Session,
+    exclude_menu_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Devuelve el menú anterior como señales compactas de variedad reciente."""
     statement = (
         select(WeeklyMenu)
         .where(WeeklyMenu.user_id == DEMO_USER_ID)
@@ -1941,7 +1957,63 @@ def _previous_menu_recipe_titles(session: Session, exclude_menu_id: str | None =
     menu = session.scalar(statement)
     if not menu:
         return []
-    return [item.recipe.title for item in menu.items if item.recipe and item.recipe.title]
+    context: list[dict[str, Any]] = []
+    for item in menu.items:
+        if not item.recipe or not item.recipe.title:
+            continue
+        context.append(
+            {
+                "title": item.recipe.title,
+                "ingredients": item.recipe.ingredients or [],
+                "dish_type": _infer_recipe_dish_type(item.recipe.title, item.recipe.tags or []),
+            }
+        )
+    return context
+
+
+def _recent_menu_ingredient_names(recent_recipe_context: list[dict[str, Any]]) -> list[str]:
+    """Extrae ingredientes recientes para despriorizarlos cuando la nevera es amplia."""
+    ingredient_names: list[str] = []
+    for recipe in recent_recipe_context:
+        for value in recipe.get("ingredients") or []:
+            cleaned = str(value).split(" - ", 1)[0].split(":", 1)[0].strip()
+            if cleaned:
+                ingredient_names.append(cleaned)
+    return _ordered_unique_names(ingredient_names)
+
+
+def _recent_menu_dish_types(recent_recipe_context: list[dict[str, Any]]) -> list[str]:
+    """Resume tipos de plato recientes para empujar variedad de técnicas."""
+    return _ordered_unique_names(
+        [
+            str(recipe.get("dish_type") or "").strip()
+            for recipe in recent_recipe_context
+            if str(recipe.get("dish_type") or "").strip()
+        ]
+    )
+
+
+def _infer_recipe_dish_type(title: str, tags: list[str]) -> str:
+    """Clasifica de forma simple el estilo del plato a partir de título y tags."""
+    normalized = normalize_label(" ".join([title, *tags]))
+    type_keywords = (
+        ("ensalada", "ensalada"),
+        ("revuelto", "revuelto"),
+        ("tortilla", "tortilla"),
+        ("pasta", "pasta"),
+        ("arroz", "arroz"),
+        ("salteado", "salteado"),
+        ("bowl", "bowl"),
+        ("crema", "crema"),
+        ("sopa", "sopa"),
+        ("horno", "horno"),
+        ("asado", "horno"),
+        ("yogur", "lacteo"),
+    )
+    for keyword, label in type_keywords:
+        if keyword in normalized:
+            return label
+    return "plato principal"
 
 
 def _replacement_recipe_titles(session: Session, menu_id: str) -> list[str]:
